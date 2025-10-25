@@ -1,0 +1,28 @@
+{
+  "name": "chatbot-itu",
+  "version": "1.0.0",
+  "description": "A simple, modern chatbot UI for ITU with vector database",
+  "main": "app.py",
+  "scripts": {
+    "start": "python app.py",
+    "scrape": "python run_scraper.py",
+    "dev": "python app.py"
+  },
+  "keywords": [
+    "chatbot",
+    "ui",
+    "itu",
+    "web",
+    "interface",
+    "vector-database",
+    "faiss",
+    "scraping"
+  ],
+  "author": "ITU Chatbot Team",
+  "license": "MIT",
+  "devDependencies": {},
+  "dependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
