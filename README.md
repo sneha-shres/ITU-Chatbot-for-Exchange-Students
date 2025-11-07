@@ -14,18 +14,41 @@ A modern chatbot interface for the IT University of Copenhagen (ITU) that uses w
 
 ```
 Chatbot_ITU/
-├── app.py                 # Flask backend server
-├── scraper.py            # Web scraper for ITU website
-├── vector_db.py          # FAISS vector database implementation
-├── run_scraper.py        # Main script to run everything
-├── requirements.txt      # Python dependencies
-├── package.json         # Project configuration
-├── templates/
-│   └── index.html       # Main chat interface
-├── static/
-│   ├── styles.css       # CSS styling
-│   └── script.js        # Frontend JavaScript
-└── README.md           # This file
+├── app.py                      # Flask backend server
+├── scraper.py                  # Web scraper for ITU website
+├── vector_db.py                # FAISS vector database implementation
+├── sql_store.py                # SQL database storage utilities
+├── run_scraper.py              # Main script to run everything
+├── requirements.txt            # Python dependencies
+├── package.json                # Project configuration
+├── README.md                   # This file
+│
+├── Courses/                    # Course-related modules
+│   ├── __pycache__/           # Python cache files
+│   ├── course_scraper.py      # Course-specific scraper
+│   ├── csv_to_sqlite.py       # CSV to SQLite converter
+│   ├── course_pages/          # Scraped course HTML pages
+│   │   └── [144 HTML files]   # Individual course page files
+│   └── output/                # Course data outputs
+│       ├── courses.csv        # Course data in CSV format
+│       ├── courses.db         # Course data in SQLite database
+│       ├── courses.json       # Course data in JSON format
+│       └── read_csv.ipynb     # Jupyter notebook for data analysis
+│
+├── scripts/                    # Utility scripts
+│   └── data_scraper.py        # Additional data scraping utilities
+│
+├── templates/                  # Flask HTML templates
+│   └── index.html             # Main chat interface
+│
+├── static/                     # Static assets
+│   ├── styles.css             # CSS styling
+│   └── script.js              # Frontend JavaScript
+│
+├── itu_metadata.pkl           # Pickled metadata
+├── itu_scraped_data.json      # Scraped ITU website data
+├── itu_scraped_urls.txt       # List of scraped URLs
+└── itu_vector_index.faiss     # FAISS vector index file
 ```
 
 ## Installation

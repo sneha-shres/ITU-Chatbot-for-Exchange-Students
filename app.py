@@ -4,6 +4,8 @@ import random
 import datetime
 import re
 from vector_db import ITUVectorDatabase
+from course_db import CourseDatabase
+from rag_pipeline import RAGPipeline
 import os
 import openai
 from typing import List, Dict
@@ -15,12 +17,16 @@ class Chatbot:
     def __init__(self):
         self.conversation_history = []
         self.vector_db = None
+        self.course_db = None
+        self.rag_pipeline = None
         self.openai_client = None
-        self.load_vector_database()
+        self.load_databases()
         self.setup_openai()
+        self.initialize_rag_pipeline()
     
-    def load_vector_database(self):
-        """Load the vector database if it exists"""
+    def load_databases(self):
+        """Load both vector and course databases"""
+        # Load vector database
         try:
             if os.path.exists("itu_vector_index.faiss") and os.path.exists("itu_metadata.pkl"):
                 self.vector_db = ITUVectorDatabase()
@@ -30,6 +36,16 @@ class Chatbot:
                 print("⚠️ Vector database not found. Run scraper and vector_db scripts first.")
         except Exception as e:
             print(f"❌ Error loading vector database: {e}")
+        
+        # Load course database
+        try:
+            self.course_db = CourseDatabase()
+            if self.course_db.db_path:
+                print("✅ Course database loaded successfully")
+            else:
+                print("⚠️ Course database not found. Some course queries may not work.")
+        except Exception as e:
+            print(f"❌ Error loading course database: {e}")
     
     def setup_openai(self):
         """Setup OpenAI client"""
@@ -42,6 +58,18 @@ class Chatbot:
                 print("⚠️ OPENAI_API_KEY not found. LLM responses will be disabled.")
         except Exception as e:
             print(f"❌ Error setting up OpenAI: {e}")
+    
+    def initialize_rag_pipeline(self):
+        """Initialize the RAG pipeline with loaded databases"""
+        try:
+            self.rag_pipeline = RAGPipeline(
+                vector_db=self.vector_db,
+                course_db=self.course_db,
+                openai_client=self.openai_client
+            )
+            print("✅ RAG pipeline initialized successfully")
+        except Exception as e:
+            print(f"❌ Error initializing RAG pipeline: {e}")
     
     def search_knowledge_base(self, query: str, k: int = 3) -> list:
         """Search the ITU knowledge base for relevant information"""
@@ -59,46 +87,46 @@ class Chatbot:
         """Generate natural language response using LLM or local processing"""
         if not search_results:
             return None
-        
         # Try OpenAI first if available
         if self.openai_client:
             try:
                 # Prepare context from search results
                 context_parts = []
-                for result in search_results:
-                    context_parts.append(f"Title: {result['title']}\nContent: {result['text']}\nURL: {result['url']}")
-                
+                for i, result in enumerate(search_results, start=1):
+                    title = result.get('title') or result.get('doc_id') or f'Source {i}'
+                    url = result.get('url', '')
+                    text = result.get('text', '')
+                    context_parts.append(f"Source {i}: {title}\nURL: {url}\nContent: {text}\n")
+
                 context = "\n\n".join(context_parts)
-                
-                prompt = f"""You are a helpful ITU (IT University of Copenhagen) assistant. Based on the following information from the ITU website, provide a natural, conversational response to the user's question.
 
-User's question: {user_message}
+                model = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+                temperature = float(os.getenv('OPENAI_TEMPERATURE', '0.1'))
+                max_tokens = int(os.getenv('OPENAI_MAX_TOKENS', '500'))
 
-ITU Website Content:
-{context}
+                system_instructions = (
+                    "You are an assistant for exchange students at the IT University of Copenhagen (ITU). "
+                    "Answer using ONLY the information provided in the Context. Do not hallucinate. "
+                    "If the answer cannot be found in the Context, reply: 'I couldn't find that in the available ITU data.'" 
+                    "When reporting course information, use the following compact course-card format for each course: "
+                    "Title (Course code) - X ECTS - Semester - Language - Instructors (if available). "
+                    "After each asserted fact, include a short citation using the source index or URL from the Context, e.g. (Source 1) or (URL). "
+                )
 
-Instructions:
-- Answer the user's question in a friendly, conversational tone
-- Use the provided ITU content to give accurate information
-- If the content doesn't fully answer the question, acknowledge this and provide what information is available
-- Keep the response concise but informative
-- Don't repeat the raw content - synthesize it into a natural response
-- If there are specific procedures or deadlines mentioned, highlight them clearly
-
-Response:"""
+                user_prompt = f"User question: {user_message}\n\nContext:\n{context}\n\nPlease answer concisely and cite sources as described above."
 
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model=model,
                     messages=[
-                        {"role": "system", "content": "You are a helpful assistant for ITU students and prospective students."},
-                        {"role": "user", "content": prompt}
+                        {"role": "system", "content": system_instructions},
+                        {"role": "user", "content": user_prompt}
                     ],
-                    max_tokens=500,
-                    temperature=0.7
+                    max_tokens=max_tokens,
+                    temperature=temperature
                 )
-                
+
                 return response.choices[0].message.content.strip()
-                
+
             except Exception as e:
                 print(f"Error generating OpenAI response: {e}")
         
@@ -142,7 +170,7 @@ Response:"""
             return f"Based on ITU information: {content[:300]}...\n\nThis information comes from the ITU website. For more details, you can visit the source page or contact ITU directly."
     
     def generate_response(self, user_message):
-        """Generate a response based on the user's message"""
+        """Generate a response using the RAG pipeline"""
         message_lower = user_message.lower()
         
         # Store the conversation
@@ -151,45 +179,53 @@ Response:"""
             'timestamp': datetime.datetime.now().isoformat()
         })
         
-        # First, try to find relevant information in the knowledge base
-        knowledge_results = self.search_knowledge_base(user_message, k=3)
+        # Handle greetings and simple queries first (match whole words to avoid false positives like 'which')
+        import re
+        if re.search(r"\b(hello|hi|hey|good morning|good afternoon|good evening)\b", message_lower):
+            return "Hello! I'm the ITU Chatbot, here to help exchange students with questions about courses, programs, and ITU services. How can I assist you today?"
         
+        if 'help' in message_lower:
+            return "I'm here to help! You can ask me about:\n- ITU courses (codes, ECTS, semesters, instructors)\n- Exchange student information\n- Admission and application processes\n- Campus facilities and services\n- General ITU information\n\nWhat would you like to know?"
+        
+        if any(phrase in message_lower for phrase in ['how are you', 'how do you do', 'how\'s it going']):
+            return "I'm doing great, thank you for asking! I'm here and ready to help with any questions about ITU. What can I help you with?"
+        
+        if 'name' in message_lower and ('what' in message_lower or 'your' in message_lower):
+            return "I'm the ITU Chatbot! I'm designed to help exchange students and prospective students with questions about ITU courses, programs, and services. What can I help you with?"
+        
+        if any(phrase in message_lower for phrase in ['thank', 'thanks', 'appreciate']):
+            return "You're very welcome! I'm happy to help. Is there anything else you'd like to know about ITU?"
+        
+        if any(phrase in message_lower for phrase in ['bye', 'goodbye', 'see you', 'farewell']):
+            return "Goodbye! It was nice chatting with you. Feel free to come back anytime if you have more questions about ITU!"
+        
+        # Use RAG pipeline for substantive queries
+        if self.rag_pipeline:
+            try:
+                # Retrieve relevant context
+                context = self.rag_pipeline.retrieve(user_message, sql_k=5, vector_k=3)
+                
+                # Generate response using RAG
+                response = self.rag_pipeline.generate_response(
+                    user_message,
+                    context,
+                    use_llm=True
+                )
+                
+                if response:
+                    return response
+            except Exception as e:
+                print(f"Error in RAG pipeline: {e}")
+                # Fall through to fallback responses
+        
+        # Fallback: Try old vector search method if RAG fails
+        knowledge_results = self.search_knowledge_base(user_message, k=3)
         if knowledge_results:
-            # Try to generate LLM response first
             llm_response = self.generate_llm_response(user_message, knowledge_results)
             if llm_response:
                 return llm_response
-            
-            # Fallback to structured response if LLM fails
-            response_parts = []
-            for i, result in enumerate(knowledge_results, 1):
-                if result['similarity_score'] > 0.2:  # Lower threshold to get more results
-                    similarity_pct = result['similarity_score'] * 100
-                    response_parts.append(f"{i}. **{result['title']}** (Relevance: {similarity_pct:.1f}%)\n   {result['text'][:300]}...")
-            
-            if response_parts:
-                sources = "\n".join([f"• {result['url']}" for result in knowledge_results[:2]])
-                return f"Based on ITU website content:\n\n" + "\n\n".join(response_parts) + f"\n\n**Sources:**\n{sources}"
         
-        # Fall back to simple response patterns if no relevant knowledge found
-        if any(greeting in message_lower for greeting in ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening']):
-            return "Hello! Nice to meet you. How can I assist you today?"
-        
-        if 'help' in message_lower:
-            return "I'm here to help! You can ask me questions, and I'll do my best to provide useful information. What would you like to know?"
-        
-        if any(phrase in message_lower for phrase in ['how are you', 'how do you do', 'how\'s it going']):
-            return "I'm doing great, thank you for asking! I'm here and ready to help with any questions you might have."
-        
-        if 'name' in message_lower and ('what' in message_lower or 'your' in message_lower):
-            return "I'm the ITU Chatbot! I'm designed to help answer questions and provide assistance. What can I help you with?"
-        
-        if any(phrase in message_lower for phrase in ['thank', 'thanks', 'appreciate']):
-            return "You're very welcome! I'm happy to help. Is there anything else you'd like to know?"
-        
-        if any(phrase in message_lower for phrase in ['bye', 'goodbye', 'see you', 'farewell']):
-            return "Goodbye! It was nice chatting with you. Feel free to come back anytime if you have more questions!"
-        
+        # Final fallback responses
         if any(word in message_lower for word in ['time', 'date', 'clock']):
             now = datetime.datetime.now()
             return f"The current time is {now.strftime('%H:%M:%S')} and the date is {now.strftime('%B %d, %Y')}."
@@ -197,44 +233,8 @@ Response:"""
         if 'weather' in message_lower:
             return "I don't have access to real-time weather data, but I'd recommend checking a weather app or website for the most current conditions in your area."
         
-        if any(word in message_lower for word in ['joke', 'funny', 'laugh', 'humor']):
-            jokes = [
-                "Why don't scientists trust atoms? Because they make up everything!",
-                "Why did the chatbot go to therapy? It had too many issues to process!",
-                "What do you call a fake noodle? An impasta!",
-                "Why don't eggs tell jokes? They'd crack each other up!",
-                "What do you call a bear with no teeth? A gummy bear!",
-                "Why did the Python programmer prefer dark mode? Because light attracts bugs!"
-            ]
-            return random.choice(jokes)
-        
-        if 'python' in message_lower:
-            return "Python is a great programming language! It's known for its simplicity and readability. Are you working on any Python projects?"
-        
-        if 'itu' in message_lower:
-            return "ITU (International Telecommunication Union) is a specialized agency of the United Nations. Are you interested in telecommunications or IT standards?"
-        
-        if any(word in message_lower for word in ['code', 'programming', 'coding', 'develop']):
-            return "Programming is fascinating! What programming language are you working with? I'd be happy to help with coding questions."
-        
-        if any(word in message_lower for word in ['ai', 'artificial intelligence', 'machine learning']):
-            return "Artificial Intelligence is an exciting field! I'm a simple chatbot, but AI has many applications in various industries. What aspect of AI interests you?"
-        
-        # Default responses
-        default_responses = [
-            "That's an interesting question! Let me think about that for a moment.",
-            "I understand what you're asking. Could you provide a bit more detail?",
-            "Thanks for sharing that with me. What would you like to know more about?",
-            "I'm processing your message. Could you rephrase that in a different way?",
-            "That's a great point! I'd be happy to discuss this further with you.",
-            "I appreciate your question. Let me help you with that.",
-            "Interesting! I'd like to learn more about your perspective on this.",
-            "I'm here to help! Could you tell me more about what you're looking for?",
-            "That's a thoughtful question. Let me see how I can assist you with that.",
-            "I'm listening! What else would you like to explore?"
-        ]
-        
-        return random.choice(default_responses)
+        # Default response
+        return "I'm here to help with questions about ITU courses, programs, and services. Could you please rephrase your question or provide more details? For example:\n- 'What AI courses are available for exchange students?'\n- 'Tell me about admission requirements'\n- 'Which courses are offered in Spring 2026?'"
 
 # Initialize the chatbot
 chatbot = Chatbot()
@@ -308,12 +308,164 @@ def search_knowledge():
 
 @app.route('/api/database/stats')
 def get_database_stats():
-    """Get vector database statistics"""
+    """Get database statistics for both vector and course databases"""
+    stats = {}
+    
+    # Vector database stats
     if chatbot.vector_db:
-        stats = chatbot.vector_db.get_database_stats()
-        return jsonify(stats)
+        stats['vector_db'] = chatbot.vector_db.get_database_stats()
     else:
-        return jsonify({'error': 'Vector database not loaded'}), 404
+        stats['vector_db'] = {'error': 'Vector database not loaded'}
+    
+    # Course database stats
+    if chatbot.course_db and chatbot.course_db.db_path:
+        stats['course_db'] = chatbot.course_db.get_database_stats()
+    else:
+        stats['course_db'] = {'error': 'Course database not loaded'}
+    
+    # RAG pipeline status
+    stats['rag_pipeline'] = {
+        'initialized': chatbot.rag_pipeline is not None,
+        'openai_available': chatbot.openai_client is not None
+    }
+    
+    return jsonify(stats)
+
+@app.route('/api/courses/search', methods=['POST'])
+def search_courses():
+    """Search courses using the course database"""
+    try:
+        data = request.get_json()
+        query = data.get('query', '').strip()
+        course_code = data.get('course_code', '').strip()
+        semester = data.get('semester', '').strip()
+        level = data.get('level', '').strip()
+        offered_exchange = data.get('offered_exchange')
+        limit = data.get('limit', 10)
+        
+        if not chatbot.course_db or not chatbot.course_db.db_path:
+            return jsonify({'error': 'Course database not available'}), 404
+        
+        # Build search parameters
+        search_params = {'limit': limit}
+        
+        if query:
+            search_params['query'] = query
+        if course_code:
+            search_params['course_code'] = course_code
+        if semester:
+            search_params['semester'] = semester
+        if level:
+            search_params['level'] = level
+        if offered_exchange is not None:
+            search_params['offered_exchange'] = bool(offered_exchange)
+        
+        courses = chatbot.course_db.search_courses(**search_params)
+        
+        return jsonify({
+            'query': query,
+            'courses': courses,
+            'total_results': len(courses)
+        })
+    
+    except Exception as e:
+        return jsonify({'error': f'An error occurred during course search: {str(e)}'}), 500
+
+@app.route('/api/courses/exchange', methods=['GET'])
+def get_exchange_courses():
+    """Get all courses available for exchange students"""
+    try:
+        semester = request.args.get('semester', '').strip()
+        limit = int(request.args.get('limit', 20))
+        
+        if not chatbot.course_db or not chatbot.course_db.db_path:
+            return jsonify({'error': 'Course database not available'}), 404
+        
+        courses = chatbot.course_db.get_exchange_courses(
+            semester=semester if semester else None,
+            limit=limit
+        )
+        
+        return jsonify({
+            'semester': semester,
+            'courses': courses,
+            'total_results': len(courses)
+        })
+    
+    except Exception as e:
+        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+
+@app.route('/api/rag/classify', methods=['POST'])
+def classify_query():
+    """Classify a query to determine which data sources to use"""
+    try:
+        data = request.get_json()
+        query = data.get('query', '').strip()
+        
+        if not query:
+            return jsonify({'error': 'Query cannot be empty'}), 400
+        
+        if not chatbot.rag_pipeline:
+            return jsonify({'error': 'RAG pipeline not initialized'}), 404
+        
+        query_type, metadata = chatbot.rag_pipeline.classify_query(query)
+        
+        return jsonify({
+            'query': query,
+            'query_type': query_type.value,
+            'metadata': metadata
+        })
+    
+    except Exception as e:
+        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+
+
+@app.route('/api/rag/retrieve', methods=['POST'])
+def rag_retrieve():
+    """Retrieve merged RAG context for a query (diagnostic endpoint)."""
+    try:
+        data = request.get_json()
+        query = data.get('query', '').strip()
+
+        if not query:
+            return jsonify({'error': 'Query cannot be empty'}), 400
+
+        if not chatbot.rag_pipeline:
+            return jsonify({'error': 'RAG pipeline not initialized'}), 404
+
+        # Allow overriding retrieval pagination via request body or environment defaults
+        sql_k = data.get('sql_k')
+        sql_offset = data.get('sql_offset', 0)
+        vector_k = data.get('vector_k')
+        vector_offset = data.get('vector_offset', 0)
+
+        # Convert to ints if provided
+        try:
+            sql_k = int(sql_k) if sql_k is not None else None
+        except Exception:
+            sql_k = None
+        try:
+            sql_offset = int(sql_offset)
+        except Exception:
+            sql_offset = 0
+        try:
+            vector_k = int(vector_k) if vector_k is not None else None
+        except Exception:
+            vector_k = None
+        try:
+            vector_offset = int(vector_offset)
+        except Exception:
+            vector_offset = 0
+
+        merged = chatbot.rag_pipeline.retrieve(query, sql_k=sql_k, sql_offset=sql_offset, vector_k=vector_k, vector_offset=vector_offset)
+
+        return jsonify({
+            'query': query,
+            'merged': merged
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
 
 if __name__ == '__main__':
     print("🤖 ITU Chatbot starting...")
