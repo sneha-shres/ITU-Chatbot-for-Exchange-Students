@@ -18,10 +18,13 @@ Chatbot_ITU/
 ├── scraper.py                  # Web scraper for ITU website
 ├── vector_db.py                # FAISS vector database implementation
 ├── sql_store.py                # SQL database storage utilities
+├── course_db.py                # Course database interface
+├── rag_pipeline.py             # RAG implementation
 ├── run_scraper.py              # Main script to run everything
 ├── requirements.txt            # Python dependencies
 ├── package.json                # Project configuration
 ├── README.md                   # This file
+├── RAG_ARCHITECTURE.md         # RAG system documentation
 │
 ├── Courses/                    # Course-related modules
 │   ├── __pycache__/           # Python cache files
