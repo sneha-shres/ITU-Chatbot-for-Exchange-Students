@@ -27,10 +27,11 @@ class CourseDatabase:
             self.db_path = str(Path(db_path).expanduser())
         else:
             # Try a list of candidate paths relative to the repo and cwd
-            repo_root = Path(__file__).parent.resolve()
+            repo_root = Path(__file__).parent.parent.parent.resolve()  # up to repo root from src/database/
             candidates = [
+                repo_root / "data" / "courses" / "courses.db",
                 repo_root / "Courses" / "output" / "courses.db",
-                repo_root / "Courses" / "output" / "courses.sqlite",
+                Path.cwd() / "data" / "courses" / "courses.db",
                 Path.cwd() / "Courses" / "output" / "courses.db",
                 Path.cwd() / "courses.db",
             ]

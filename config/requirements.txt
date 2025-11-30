@@ -10,4 +10,5 @@ pandas
 tqdm
 urllib3
 lxml
-openai
+python-dotenv
+python-dotenv

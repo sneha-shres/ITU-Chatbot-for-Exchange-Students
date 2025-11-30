@@ -12,10 +12,25 @@ from enum import Enum
 import logging
 
 import os
-from vector_db import ITUVectorDatabase
-from course_db import CourseDatabase
+from src.database.vector_db import ITUVectorDatabase
+from src.database.course_db import CourseDatabase
+import requests
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
+
+# Define constants at module level for reusability
+STOP_WORDS = {"the", "and", "or", "but", "for", "with", "from", "about", "what", "which", "when", "where", "how", "why"}
+NOISY_NGRAMS = {"language", "ects", "show", "give", "available", "courses", "course", "in", "the", "me", "how", "what", "when", "where", "which", "why"}
+COURSE_KEYWORDS = ['course', 'courses', 'ects', 'syllabus', 'course code', 'module', 'curriculum', 'study', 'class']
+EXCHANGE_KEYWORDS = ['exchange', 'exchange student', 'exchange students', 'erasmus']
+VECTOR_KEYWORDS = ['apply', 'application', 'admission', 'housing', 'deadline', 'campus', 'research', 'life', 'accommodation', 'enroll', 'enrol']
+MIN_ECTS_KEYWORDS = ['minimum', 'least', 'lowest', 'fewest', 'smallest']
 
 
 class QueryType(Enum):
@@ -32,18 +47,20 @@ class RAGPipeline:
         self,
         vector_db: ITUVectorDatabase = None,
         course_db: CourseDatabase = None,
-        openai_client = None
     ):
         """Initialize the RAG pipeline.
         
         Args:
             vector_db: Initialized ITUVectorDatabase instance
             course_db: Initialized CourseDatabase instance
-            openai_client: OpenAI client instance (optional)
         """
         self.vector_db = vector_db
         self.course_db = course_db
-        self.openai_client = openai_client
+    # No OpenAI client — Ollama HTTP is used when configured
+        # Ollama support: optional local or remote Ollama server URL (e.g. http://localhost:11434)
+        self.ollama_url = os.getenv('OLLAMA_URL')
+        self.ollama_api_key = os.getenv('OLLAMA_API_KEY')
+
         # Configurable defaults from environment
         self.default_sql_k = int(os.getenv('RAG_SQL_K', '5'))
         self.default_vector_k = int(os.getenv('RAG_VECTOR_K', '3'))
@@ -59,17 +76,21 @@ class RAGPipeline:
         q = (query or "").strip()
         ql = q.lower()
 
-        # Patterns & keywords
-        course_code_pattern = r'\b[A-Z]{2,5}\s*\d{0,4}\b'  # e.g. BDSA, BDSA101
-        course_keywords = ['course', 'courses', 'ects', 'syllabus', 'course code', 'module', 'curriculum', 'study', 'class']
-        exchange_keywords = ['exchange', 'exchange student', 'exchange students', 'erasmus']
-        vector_keywords = ['apply', 'application', 'admission', 'housing', 'deadline', 'campus', 'research', 'life', 'accommodation', 'enroll', 'enrol']
+        # Patterns
+        course_code_pattern = r'\b([A-Z]{2,}[A-Z0-9]*)\b'  # e.g. BDSA, BDSA101, KSADAPS1KU
 
-        # Basic detections
-        is_course_code = bool(re.search(course_code_pattern, query))
-        has_course_kw = any(kw in ql for kw in course_keywords)
-        has_exchange_kw = any(kw in ql for kw in exchange_keywords)
-        has_vector_kw = any(kw in ql for kw in vector_keywords)
+        # Extract explicit course code if present (highest priority)
+        course_code_match = re.search(course_code_pattern, query)
+        extracted_course_code = course_code_match.group(1) if course_code_match else None
+        
+        # Exclude common non-course-code uppercase words
+        excluded_codes = {'ECTS', 'IT', 'ITU', 'MSC', 'BSC', 'AI', 'ML', 'NLP', 'CV'}
+        if extracted_course_code and extracted_course_code.upper() in excluded_codes:
+            extracted_course_code = None
+        
+        has_course_kw = any(kw in ql for kw in COURSE_KEYWORDS)
+        has_exchange_kw = any(kw in ql for kw in EXCHANGE_KEYWORDS)
+        has_vector_kw = any(kw in ql for kw in VECTOR_KEYWORDS)
 
         # Detect explicit ECTS mention (e.g., '15 ects' or '7,5 ECTS') and semesters
         ects_value = None
@@ -80,6 +101,7 @@ class RAGPipeline:
                 ects_value = float(raw)
             except Exception:
                 ects_value = None
+        
         semester_match = None
         if 'autumn' in ql or 'fall' in ql:
             semester_match = 'Autumn'
@@ -93,10 +115,25 @@ class RAGPipeline:
         elif 'danish' in ql or 'dansk' in ql:
             language_match = 'Danish'
 
-        logger.debug(f"Classify query: '{q}' | course_code={is_course_code} | course_kw={has_course_kw} | exchange_kw={has_exchange_kw} | vector_kw={has_vector_kw} | ects={ects_value} | semester={semester_match} | language={language_match}")
+        # Detect minimum/least/lowest ECTS keywords
+        has_min_ects = any(kw in ql for kw in MIN_ECTS_KEYWORDS)
 
-        # If it looks course-related (code, keyword, ects or semester), perform SQL probes
-        # Special-case: if ECTS explicitly mentioned, prefer an ECTS-based probe and skip n-gram title probing
+        logger.debug(f"Classify query: '{q}' | course_code={extracted_course_code} | course_kw={has_course_kw} | min_ects={has_min_ects}")
+
+        # HIGHEST PRIORITY: If explicit course code found, look up directly (SQL only, ignore vector keywords)
+        if extracted_course_code:
+            logger.debug(f"Found explicit course code: {extracted_course_code}")
+            return QueryType.SQL, {'course_code': extracted_course_code}
+
+        # Special case: if user asks for min/least ECTS, handle it as a special SQL query
+        if has_min_ects:
+            qtype = QueryType.HYBRID if has_exchange_kw or has_vector_kw else QueryType.SQL
+            meta = {'sql_matches': 0, 'min_ects': True}
+            if language_match:
+                meta['language'] = language_match
+            logger.debug(f"Detected minimum ECTS query; classifying as {qtype} with min_ects sorting")
+            return qtype, meta
+
         if ects_value is not None:
             if self.course_db:
                 try:
@@ -117,7 +154,7 @@ class RAGPipeline:
                 meta['language'] = language_match
             return QueryType.SQL, meta
 
-        if is_course_code or has_course_kw or semester_match:
+        if has_course_kw or semester_match:
             if self.course_db:
                 try:
                     # First try a direct probe across searchable fields
@@ -137,11 +174,10 @@ class RAGPipeline:
                     for n in range(min(4, len(tokens)), 0, -1):
                         for i in range(len(tokens) - n + 1):
                             ngram = ' '.join(tokens[i:i+n])
+                            # Skip noisy n-grams that are unlikely to be useful as titles
+                            if ngram.strip().lower() in NOISY_NGRAMS:
+                                continue
                             try:
-                                # Skip noisy n-grams that are unlikely to be useful as titles
-                                noisy = {"language", "ects", "show", "give", "available", "courses", "course", "in", "the", "me"}
-                                if ngram.strip().lower() in noisy:
-                                    continue
                                 title_matches = self.course_db.search_courses(course_title=ngram, limit=3)
                                 if title_matches:
                                     qtype = QueryType.HYBRID if has_exchange_kw or has_vector_kw else QueryType.SQL
@@ -159,7 +195,7 @@ class RAGPipeline:
                     logger.debug(f"SQL probe failed in classify_query: {e}")
 
             # If it looked like a course query but no SQL DB or matches, still favor SQL intent
-            if is_course_code or has_course_kw or ects_match or semester_match:
+            if has_course_kw or semester_match:
                 meta = {'sql_matches': 0}
                 if language_match:
                     meta['language'] = language_match
@@ -199,64 +235,59 @@ class RAGPipeline:
         try:
             # Extract keywords from query
             keywords = re.findall(r'\b\w{3,}\b', query.lower())
-            # Filter out common stop words
-            stop_words = {"the", "and", "or", "but", "for", "with", "from", "about", "what", "which", "when", "where", "how", "why"}
-            keywords = [kw for kw in keywords if kw not in stop_words]
+            keywords = [kw for kw in keywords if kw not in STOP_WORDS]
+            
+            # Special handling for minimum ECTS queries
+            if metadata.get("min_ects"):
+                all_courses = self.course_db.search_courses(limit=1000)
+                valid = [c for c in all_courses if c.get('ects') is not None and c.get('ects') > 0]
+                valid.sort(key=lambda x: x.get('ects', float('inf')))
+                return valid[:k]
             
             # Build search parameters
-            search_params = {
-                "limit": k,
-                "offset": offset
-            }
+            search_params = {"limit": k, "offset": offset}
             
+            # Apply metadata hints to search parameters (in priority order)
             if metadata.get("course_code"):
                 search_params["course_code"] = metadata["course_code"]
-            elif metadata.get("course_specific"):
-                search_params["course_title"] = query
-            # If classifier provided a probe n-gram (title fragment), prefer searching by title
             elif metadata.get("probe_ngram"):
                 search_params["course_title"] = metadata.get("probe_ngram")
+            elif metadata.get("course_specific"):
+                search_params["course_title"] = query
             else:
                 search_params["query"] = query
 
-            # If classifier provided a language hint, include it (do not overwrite query/course_title)
+            # Apply optional filters
             if metadata.get("language"):
                 search_params["language"] = metadata.get("language")
-            
             if metadata.get("semester"):
                 search_params["semester"] = metadata["semester"]
-            
             if metadata.get("level"):
                 search_params["level"] = metadata["level"]
-            
             if metadata.get("exchange_related"):
                 search_params["offered_exchange"] = True
 
-            # If classifier provided an ECTS hint, include it and avoid combining with raw free-text query
+            # Handle ECTS filter
             if metadata.get("ects") is not None:
                 try:
-                    # ensure numeric
                     search_params["ects"] = float(metadata.get("ects"))
                 except Exception:
                     search_params["ects"] = metadata.get("ects")
-                # If we only want to filter by ECTS (no specific title/code), remove free-text query
+                # If only filtering by ECTS (no specific course), remove free-text query
                 if not search_params.get("course_code") and not search_params.get("course_title"):
                     search_params.pop('query', None)
             
-            # If language was provided but no specific course identifier/title, prefer language-only search
+            # Remove free-text query if only using specific filters
             if metadata.get("language") and not search_params.get("course_code") and not search_params.get("course_title"):
-                # remove the free-text query since it may prevent matches when combined with language
                 search_params.pop('query', None)
 
             # Perform search
             logger.debug(f"SQL search params: {search_params}")
             courses = self.course_db.search_courses(**search_params)
             
-            # Add relevance scores (simple keyword matching)
+            # Add relevance scores and sort
             for course in courses:
                 course["relevance_score"] = self._calculate_sql_relevance(course, query, keywords)
-            
-            # Sort by relevance
             courses.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
             
             return courses[:k]
@@ -299,6 +330,7 @@ class RAGPipeline:
     
     def _calculate_sql_relevance(self, course: Dict, query: str, keywords: List[str]) -> float:
         """Calculate relevance score for a course based on query keywords.
+        Searches title, description, abstract, and course code.
         
         Args:
             course: Course dictionary
@@ -311,6 +343,11 @@ class RAGPipeline:
         score = 0.0
         query_lower = query.lower()
         
+        # Check course code match (exact or partial) — highest priority
+        course_code = (course.get("course_code") or "").lower()
+        if course_code and course_code in query_lower:
+            score += 0.5
+        
         # Check title match
         title = (course.get("course_title") or "").lower()
         if title:
@@ -319,16 +356,15 @@ class RAGPipeline:
             if query_lower in title or title in query_lower:
                 score += 0.3
         
-        # Check description/abstract match
-        description = (course.get("description") or course.get("abstract") or "").lower()
-        if description:
-            keyword_matches = sum(1 for kw in keywords if kw in description)
-            score += min(0.2, keyword_matches * 0.05)
+        # Check description AND abstract (search both fields comprehensively)
+        description = (course.get("description") or "").lower()
+        abstract = (course.get("abstract") or "").lower()
+        combined_text = description + " " + abstract
         
-        # Check course code match
-        course_code = (course.get("course_code") or "").lower()
-        if course_code and course_code in query_lower:
-            score += 0.3
+        if combined_text:
+            # Count keyword matches in description/abstract
+            keyword_matches = sum(1 for kw in keywords if kw in combined_text)
+            score += min(0.2, keyword_matches * 0.05)
         
         return min(1.0, score)
     
@@ -392,32 +428,18 @@ class RAGPipeline:
         Returns:
             Tuple of (ranked_sql_results, ranked_vector_results)
         """
-        # Normalize scores for SQL results (0.0 to 1.0)
-        for result in sql_results:
-            score = result.get("relevance_score", 0.0)
-            result["normalized_score"] = min(1.0, max(0.0, score))
-        
-        # Normalize scores for vector results (similarity scores are already 0.0 to 1.0)
-        for result in vector_results:
-            score = result.get("similarity_score", 0.0)
-            result["normalized_score"] = min(1.0, max(0.0, score))
-        
-        # Apply hybrid scoring: combine SQL relevance with vector similarity
-        # For hybrid queries, we want to balance both sources
-        # SQL results get slight priority for factual course data
         sql_weight = 0.6
         vector_weight = 0.4
         
-        # Re-rank SQL results with hybrid consideration
+        # Normalize and score SQL results
         for result in sql_results:
-            base_score = result.get("normalized_score", 0.0)
-            # Boost if it has high relevance
-            result["hybrid_score"] = base_score * sql_weight
+            score = result.get("relevance_score", 0.0)
+            result["hybrid_score"] = min(1.0, max(0.0, score)) * sql_weight
         
-        # Re-rank vector results
+        # Normalize and score vector results
         for result in vector_results:
-            base_score = result.get("normalized_score", 0.0)
-            result["hybrid_score"] = base_score * vector_weight
+            score = result.get("similarity_score", 0.0)
+            result["hybrid_score"] = min(1.0, max(0.0, score)) * vector_weight
         
         # Sort by hybrid scores
         sql_results.sort(key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
@@ -636,22 +658,25 @@ class RAGPipeline:
         Returns:
             Generated response string
         """
+        # If no context, return a helpful fallback
         if not context.get("context"):
-            return "I couldn't find relevant information to answer your question. Could you please rephrase it or provide more details?"
-        
-        # Try LLM if available and requested
-        if use_llm and self.openai_client:
+            return {"text": "I couldn't find relevant information to answer your question. Could you please rephrase it or provide more details?", "llm_used": False}
+
+        # Try LLM if available and requested. Support Ollama HTTP API.
+        if use_llm and self.ollama_url:
             try:
-                return self._generate_llm_response(query, context)
+                llm_text = self._generate_llm_response(query, context)
+                return {"text": llm_text, "llm_used": True}
             except Exception as e:
                 logger.error(f"Error generating LLM response: {e}")
                 # Fall through to template-based response
-        
+
         # Fallback to template-based response
-        return self._generate_template_response(query, context)
+        tpl = self._generate_template_response(query, context)
+        return {"text": tpl, "llm_used": False}
     
     def _generate_llm_response(self, query: str, context: Dict) -> str:
-        """Generate response using OpenAI LLM.
+        """Generate response using Ollama LLM.
         
         Args:
             query: User query
@@ -660,32 +685,164 @@ class RAGPipeline:
         Returns:
             LLM-generated response
         """
-        # Use environment-configurable model parameters
-        model = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
-        temperature = float(os.getenv('OPENAI_TEMPERATURE', '0.1'))
-        max_tokens = int(os.getenv('OPENAI_MAX_TOKENS', '800'))
+        # Use environment-configurable model parameters (prefer OLLAMA_* vars)
+        model = os.getenv('OLLAMA_MODEL', os.getenv('OPENAI_MODEL', 'gpt-oss'))
+        temperature = float(os.getenv('OLLAMA_TEMPERATURE', os.getenv('OPENAI_TEMPERATURE', '0.1')))
+        max_tokens = int(os.getenv('OLLAMA_MAX_TOKENS', os.getenv('OPENAI_MAX_TOKENS', '800')))
 
         system_prompt = (
-            "You are a helpful assistant for exchange students at the IT University of Copenhagen (ITU). "
-            "Answer using ONLY the provided Context. Do not invent facts. If the requested information is not in the Context, reply: 'I couldn't find that in the available ITU data.' "
-            "Prioritize structured SQL course data when present. For each reported course, use this compact course-card format: "
-            "Title (Course code) - X ECTS - Semester - Language - Instructors (if available). "
-            "Cite sources inline using the context source index or URL, e.g. (Source 1) or (https://...). "
+            "You are a concise, strict-format assistant for exchange students at the IT University of Copenhagen (ITU).\n"
+            "Important rules (follow exactly):\n"
+            "1) Always use ONLY the provided Context. Do NOT invent facts or add information not present in Context. If something is not in Context, reply: 'I couldn't find that in the available ITU data.'\n"
+            "2) FORMATTING FOR COURSES:\n"
+            "   - When answering about courses, list them as a NUMBERED LIST with each course on its own line\n"
+            "   - Format: 'N. Title (Course Code) - X ECTS - Semester'\n"
+            "   - Example:\n"
+            "     1. Advanced Machine Learning (KSAMLDS2KU) - 7.5 ECTS - Spring 2026\n"
+            "     2. Machine Learning (BSMALEA1KU) - 15.0 ECTS - Autumn 2026\n"
+            "   - Each course must be on its own line with proper numbering\n"
+            "3) FORMATTING FOR HYBRID QUERIES (courses + general info):\n"
+            "   - Start with 'Relevant Courses:' section with numbered list (one course per line, formatted as above)\n"
+            "   - Add blank line\n"
+            "   - Then 'General Information:' section with facts about the topic (one paragraph)\n"
+            "4) FORMATTING FOR GENERAL INFORMATION:\n"
+            "   - Use only vector data from Context\n"
+            "   - Write concisely in one or two short paragraphs\n"
+            "   - Do NOT include citations or source references\n"
+            "5) Be concise and well-formatted: clear section headers, proper spacing between sections, numbered lists for courses\n"
+            "6) Do not include any intermediate JSON or streaming fragments — output a single clean text response only.\n"
+            "7) If the query is unrelated or Context is empty, respond with: 'I couldn't find relevant information to answer your question.'\n"
         )
 
         user_prompt = f"User Question: {query}\n\nContext:\n{context.get('context', 'No context available')}\n\nProvide a concise, factual answer and include citations as requested."
 
-        response = self.openai_client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=max_tokens,
-            temperature=temperature
-        )
+        # Ollama is the only supported LLM backend now. Require OLLAMA_URL to be set.
+        if self.ollama_url:
+            try:
+                return self._generate_ollama_response(system_prompt, user_prompt, model=model, temperature=temperature, max_tokens=max_tokens)
+            except Exception as e:
+                logger.error(f"Error calling Ollama API: {e}")
+                raise
 
-        return response.choices[0].message.content.strip()
+        # If we reach here, no Ollama URL configured — raise a clear error so callers fall back to templates
+        raise RuntimeError("OLLAMA_URL is not configured; cannot call LLM")
+
+    def _generate_ollama_response(self, system_prompt: str, user_prompt: str, model: str = None, temperature: float = 0.1, max_tokens: int = 800) -> str:
+        """Call an Ollama server via its HTTP API and return the generated text.
+
+        Expects an environment variable OLLAMA_URL (e.g. http://localhost:11434).
+        Optionally uses OLLAMA_API_KEY for authorization if set.
+        """
+        if not self.ollama_url:
+            raise RuntimeError("OLLAMA_URL is not configured")
+
+        payload = {
+            # Ollama typically accepts a `model` and `prompt`/`instruction` field; place system+user into the prompt
+            "model": model or os.getenv('OLLAMA_MODEL', os.getenv('OPENAI_MODEL', 'gpt-oss')),
+            "prompt": f"{system_prompt}\n\n{user_prompt}",
+            "temperature": float(temperature),
+            # max_tokens may not be supported by all Ollama models; include as a hint
+            "max_tokens": int(max_tokens)
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if self.ollama_api_key:
+            headers["Authorization"] = f"Bearer {self.ollama_api_key}"
+
+        url = self.ollama_url.rstrip('/') + '/api/generate'
+        resp = requests.post(url, json=payload, headers=headers, timeout=30, stream=True)
+
+        # If endpoint returned a non-200 code, try to show a helpful error
+        if resp.status_code != 200:
+            try:
+                body = resp.text
+            except Exception:
+                body = '<unreadable body>'
+            logger.error(f"Ollama returned status {resp.status_code}: {body}")
+            raise RuntimeError(f"Ollama API error: {resp.status_code}")
+
+        # The Ollama server may stream incremental JSON objects (SSE-like or newline-delimited JSON).
+        # We'll iterate the response lines and accumulate text fragments from common fields
+        accumulated = []
+        final_text = None
+
+        try:
+            for raw_line in resp.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+
+                line = raw_line.strip()
+                # handle SSE 'data: {...}' lines
+                if line.startswith('data:'):
+                    line = line[len('data:'):].strip()
+
+                # Try to parse JSON from the line
+                try:
+                    part = None
+                    j = None
+                    # Some servers send multiple JSON objects per line; try json.loads
+                    import json
+                    j = json.loads(line)
+
+                    # prefer 'response' then 'output' then nested choices/results
+                    # IMPORTANT: ignore 'thinking' fragments (internal chain-of-thought)
+                    if isinstance(j, dict):
+                        # If server sends chunk with 'response' (final) or 'thinking' (partial)
+                        if 'response' in j and isinstance(j['response'], str) and j['response']:
+                            part = j['response']
+                        elif 'output' in j and isinstance(j['output'], str) and j['output']:
+                            part = j['output']
+                        elif 'results' in j and isinstance(j['results'], list) and j['results']:
+                            first = j['results'][0]
+                            if isinstance(first, dict):
+                                for key in ('text', 'output'):
+                                    if key in first and isinstance(first[key], str) and first[key]:
+                                        part = first[key]
+                                        break
+                            elif isinstance(first, str):
+                                part = first
+                        elif 'choices' in j and isinstance(j['choices'], list) and j['choices']:
+                            ch = j['choices'][0]
+                            if isinstance(ch, dict):
+                                if 'message' in ch and isinstance(ch['message'], dict) and 'content' in ch['message']:
+                                    part = str(ch['message']['content'])
+                                else:
+                                    for key in ('text', 'output'):
+                                        if key in ch and isinstance(ch[key], str):
+                                            part = ch[key]
+                                            break
+                        # If there's a 'done' flag and it's true, mark final_text
+                        if j.get('done') is True:
+                            # Only append if this chunk contained a non-thinking response/output
+                            if part:
+                                accumulated.append(part)
+                            final_text = ''.join(accumulated).strip()
+                            break
+
+                    # Only append selected parts (response/output/text) -- ignore 'thinking' fragments
+                    if part:
+                        accumulated.append(part)
+                        # continue reading until done=True is seen
+                        continue
+                except Exception:
+                    # Not a JSON line -- ignore to avoid leaking chain-of-thought or protocol noise
+                    continue
+
+            # After streaming, if we have a final_text from done flag use it
+            if final_text is not None:
+                return final_text
+
+            # Otherwise, join accumulated parts and return
+            if accumulated:
+                return ''.join(accumulated).strip()
+
+            # Fallback: return raw text
+            return resp.text.strip()
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
     
     def _generate_template_response(self, query: str, context: Dict) -> str:
         """Generate response using template-based approach (fallback).
@@ -704,7 +861,6 @@ class RAGPipeline:
         response_parts = []
         
         if query_type == "sql" and sql_results:
-            response_parts.append("Here are the courses that match your query:\n\n")
             for i, course in enumerate(sql_results[:self.max_sql_items], 1):
                 title = course.get("course_title", "Unknown")
                 code = course.get("course_code", "")
@@ -722,24 +878,32 @@ class RAGPipeline:
                 response_parts.append(course_info)
         
         elif query_type == "vector" and vector_results:
-            response_parts.append("Based on ITU information:\n\n")
             best_result = vector_results[0]
             response_parts.append(best_result.get("text", "")[:self.max_context_chars])
         
         elif query_type == "hybrid":
             if sql_results:
-                response_parts.append("**Course Information:**\n")
-                for course in sql_results[:self.max_sql_items]:
+                response_parts.append("Relevant Courses:")
+                for i, course in enumerate(sql_results[:self.max_sql_items], 1):
                     title = course.get("course_title", "Unknown")
                     code = course.get("course_code", "")
+                    ects = course.get("ects", "")
+                    semester = course.get("semester", "")
+                    
+                    course_info = f"{i}. {title}"
                     if code:
-                        response_parts.append(f"- {title} ({code})")
-                    else:
-                        response_parts.append(f"- {title}")
-                response_parts.append("")
+                        course_info += f" ({code})"
+                    if ects:
+                        course_info += f" - {ects} ECTS"
+                    if semester:
+                        course_info += f" - {semester}"
+                    
+                    response_parts.append(course_info)
+                
+                response_parts.append("")  # Blank line separator
             
             if vector_results:
-                response_parts.append("**General Information:**\n")
+                response_parts.append("General Information:")
                 response_parts.append(vector_results[0].get("text", "")[:self.max_context_chars])
         
         if not response_parts:

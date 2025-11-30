@@ -344,15 +344,21 @@ class ITUWebScraper:
         self.scraped_data = scraped_data
         return scraped_data
     
-    def save_to_json(self, filename: str = "itu_scraped_data.json"):
+    def save_to_json(self, filename: str = None):
         """Save scraped data to JSON file"""
+        if filename is None:
+            filename = os.path.join('data', 'vectors', 'itu_scraped_data.json')
+        os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(self.scraped_data, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved {len(self.scraped_data)} pages to {filename}")
     
-    def save_urls_list(self, filename: str = "itu_scraped_urls.txt"):
+    def save_urls_list(self, filename: str = None):
         """Save list of all scraped URLs to a text file"""
         try:
+            if filename is None:
+                filename = os.path.join('data', 'vectors', 'itu_scraped_urls.txt')
+            os.makedirs(os.path.dirname(filename) or '.', exist_ok=True)
             urls = [page['url'] for page in self.scraped_data]
             with open(filename, 'w', encoding='utf-8') as f:
                 for url in sorted(urls):

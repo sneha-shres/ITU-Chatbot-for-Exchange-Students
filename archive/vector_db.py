@@ -6,6 +6,11 @@ import pickle
 import os
 from typing import List, Dict, Tuple
 import logging
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except Exception:
+  pass
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +43,11 @@ def chunk_text(text: str, max_tokens: int = 500, overlap: int = 100) -> List[str
 
 
 class ITUVectorDatabase:
-  def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+  def __init__(self, model_name: str = None):
+    # Allow overriding via environment variable VECTOR_MODEL_NAME or by passing model_name
+    import os as _os
+    if model_name is None:
+      model_name = _os.getenv('VECTOR_MODEL_NAME', 'all-MiniLM-L6-v2')
     self.model_name = model_name
     self.model = SentenceTransformer(model_name)
     self.index = None
@@ -101,14 +110,25 @@ class ITUVectorDatabase:
     if self.index is None:
       logger.error("No index to save")
       return
+    # Default to data/vectors paths after reorganization
+    if index_path is None:
+      index_path = os.path.join('data', 'vectors', 'itu_vector_index.faiss')
+    if metadata_path is None:
+      metadata_path = os.path.join('data', 'vectors', 'itu_metadata.pkl')
+    os.makedirs(os.path.dirname(index_path) or '.', exist_ok=True)
     faiss.write_index(self.index, index_path)
     logger.info(f"Saved FAISS index to {index_path}")
     with open(metadata_path, 'wb') as f:
       pickle.dump(self.metadata, f)
     logger.info(f"Saved metadata to {metadata_path}")
 
-  def load_database(self, index_path: str = "itu_vector_index.faiss", metadata_path: str = "itu_metadata.pkl"):
+  def load_database(self, index_path: str = None, metadata_path: str = None):
     try:
+      if index_path is None:
+        index_path = os.path.join('data', 'vectors', 'itu_vector_index.faiss')
+      if metadata_path is None:
+        metadata_path = os.path.join('data', 'vectors', 'itu_metadata.pkl')
+
       self.index = faiss.read_index(index_path)
       logger.info(f"Loaded FAISS index from {index_path}")
       with open(metadata_path, 'rb') as f:

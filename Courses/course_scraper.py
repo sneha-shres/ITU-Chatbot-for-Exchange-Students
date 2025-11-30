@@ -24,8 +24,8 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 # Configuration: set your paths here
 # ---------------------------------------
 INPUT_DIR = "Courses/course_pages"           
-OUT_JSON = "Courses/output/courses.json"      
-OUT_CSV  = "Courses/output/courses.csv"      
+OUT_JSON = "data/courses/courses.json"      
+OUT_CSV  = "data/courses/courses.csv"      
 
 # ---------------------------
 # Helpers: text normalization

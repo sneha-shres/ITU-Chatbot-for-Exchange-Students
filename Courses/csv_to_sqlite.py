@@ -15,8 +15,8 @@ import sqlite3
 from pathlib import Path
 
 # Configuration
-CSV_FILE = "Courses/output/courses.csv"
-DB_FILE = "Courses/output/courses.db"
+CSV_FILE = "data/courses/courses.csv"
+DB_FILE = "data/courses/courses.db"
 
 def create_table(cursor: sqlite3.Cursor):
     """Create the courses table with appropriate schema."""

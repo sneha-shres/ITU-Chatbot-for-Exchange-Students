@@ -12,9 +12,15 @@ Usage:
 """
 
 import os
-from scraper import ITUWebScraper
-from vector_db import ITUVectorDatabase, chunk_text
-from sql_store import SQLStore
+# Load environment variables from .env if present
+try:
+  from dotenv import load_dotenv
+  load_dotenv()
+except Exception:
+  pass
+from utils.scraper import ITUWebScraper
+from database.vector_db import ITUVectorDatabase, chunk_text
+from database.sql_store import SQLStore
 
 
 def main():
@@ -30,16 +36,16 @@ def main():
     print("❌ No data scraped. Exiting.")
     return
 
-  # Save JSON snapshot for reference
-  json_path = "itu_scraped_data.json"
+  # Save JSON snapshot for reference in data/vectors
+  json_path = os.path.join('data', 'vectors', 'itu_scraped_data.json')
   scraper.save_to_json(json_path)
   
   # Save URLs list for easy reference
-  scraper.save_urls_list("itu_scraped_urls.txt")
+  scraper.save_urls_list(os.path.join('data', 'itu_scraped_urls.txt'))
 
   # Step 2: Store to SQLite
   print("\nStep 2: Storing pages and chunks to SQLite (itu_content.db)...")
-  store = SQLStore("itu_content.db")
+  store = SQLStore(os.path.join('data', 'vectors', 'itu_content.db'))
   total_chunks = 0
   for page in scraped_data:
     page_id = store.upsert_page(page)

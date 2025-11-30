@@ -1,103 +1,159 @@
-# ITU Chatbot with Vector Database
+# ITU Chatbot (RAG + Ollama)
 
-A modern chatbot interface for the IT University of Copenhagen (ITU) that uses web scraping and vector embeddings to provide intelligent responses about ITU programs, research, and services.
-
-## Features
-
-- 🕷️ **Web Scraping**: Automatically scrapes ITU website content (excluding news)
-- 🧠 **Vector Database**: Uses FAISS for fast similarity search
-- 🤖 **Smart Chatbot**: Provides contextual responses based on ITU knowledge
-- 🎨 **Modern UI**: Beautiful, responsive chat interface
-- 🔍 **Semantic Search**: Finds relevant information using embeddings
+Answer ITU student questions using a Retrieval-Augmented Generation (RAG) pipeline that combines:
+- SQL course database lookups (SQLite)
+- Vector search over scraped ITU content (FAISS + SentenceTransformers)
+- Optional LLM generation via Ollama (local) with graceful fallback
 
 ## Project Structure
 
 ```
-Chatbot_ITU/
-├── app.py                      # Flask backend server
-├── scraper.py                  # Web scraper for ITU website
-├── vector_db.py                # FAISS vector database implementation
-├── sql_store.py                # SQL database storage utilities
-├── course_db.py                # Course database interface
-├── rag_pipeline.py             # RAG implementation
-├── run_scraper.py              # Main script to run everything
-├── requirements.txt            # Python dependencies
-├── package.json                # Project configuration
-├── README.md                   # This file
-├── RAG_ARCHITECTURE.md         # RAG system documentation
+├── src/
+│   ├── core/
+│   │   ├── app.py               # Flask server & API
+│   │   └── rag_pipeline.py      # Query classification + retrieval + generation
+│   ├── database/
+│   │   ├── course_db.py         # Courses SQLite access
+│   │   ├── vector_db.py         # FAISS index + embeddings
+│   │   └── sql_store.py         # Optional page/chunk storage
+│   └── utils/
+│       └── scraper.py           # ITU website scraper utilities
 │
-├── Courses/                    # Course-related modules
-│   ├── __pycache__/           # Python cache files
-│   ├── course_scraper.py      # Course-specific scraper
-│   ├── csv_to_sqlite.py       # CSV to SQLite converter
-│   ├── course_pages/          # Scraped course HTML pages
-│   │   └── [144 HTML files]   # Individual course page files
-│   └── output/                # Course data outputs
-│       ├── courses.csv        # Course data in CSV format
-│       ├── courses.db         # Course data in SQLite database
-│       ├── courses.json       # Course data in JSON format
-│       └── read_csv.ipynb     # Jupyter notebook for data analysis
+├── data/
+│   ├── courses/
+│   │   └── courses.db           # SQLite DB (144 rows)
+│   └── vectors/
+│       ├── itu_vector_index.faiss
+│       ├── itu_metadata.pkl
+│       └── itu_scraped_data.json
 │
-├── scripts/                    # Utility scripts
-│   └── data_scraper.py        # Additional data scraping utilities
+├── tools/
+│   ├── run_scraper.py           # Scrape + build vectors
+│   └── create_courses_db.py     # Convert CSV → SQLite
 │
-├── templates/                  # Flask HTML templates
-│   └── index.html             # Main chat interface
+├── config/
+│   └── requirements.txt         # Python dependencies
 │
-├── static/                     # Static assets
-│   ├── styles.css             # CSS styling
-│   └── script.js              # Frontend JavaScript
+├── tests/
+│   └── test_rag_sql.py          # Simple RAG checks
 │
-├── itu_metadata.pkl           # Pickled metadata
-├── itu_scraped_data.json      # Scraped ITU website data
-├── itu_scraped_urls.txt       # List of scraped URLs
-└── itu_vector_index.faiss     # FAISS vector index file
+├── templates/index.html         # Web UI
+└── static/{styles.css,script.js}
 ```
 
-## Installation
+## Prerequisites
 
-1. **Clone or download the project**
-2. **Create a virtual environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+- Python 3.10+
+- pip
+- Optional: virtualenv (`python3 -m venv .venv && source .venv/bin/activate`)
+- Optional: Ollama (for LLM responses): https://ollama.ai
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Quick Start
 
-## Usage
-
-### 1. Scrape ITU Website and Build Vector Database
+1) Install Python dependencies
 
 ```bash
-python run_scraper.py
+pip install -r config/requirements.txt
+```
+
+2) Set module path (required for direct script execution)
+
+```bash
+export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
+```
+
+3) (Optional) Enable LLM via Ollama
+
+```bash
+ollama serve                     # start server on http://localhost:11434
+ollama pull gpt-oss:20b-cloud    # pull a chat-capable model
+```
+
+Minimal `.env` (optional; if absent, the app will gracefully use template fallback):
+
+```env
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=gpt-oss:20b-cloud
+```
+
+4) Run the web app (Option 2: PYTHONPATH + direct script)
+
+```bash
+python src/core/app.py
+```
+
+Open http://localhost:5000
+
+Alternative (without exporting PYTHONPATH each time): run as a module:
+
+```bash
+python -m src.core.app
+```
+
+If you see `ModuleNotFoundError: No module named 'database'` it means `src` was not on `PYTHONPATH`. Export it (Option 2) or use the module form above.
+
+## Testing
+
+```bash
+export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
+python tests/test_rag_sql.py
+```
+
+## Vector Data: Build or Rebuild (optional)
+
+The repo already expects vector files in `data/vectors/`. To rebuild from scratch:
+
+```bash
+export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
+python tools/run_scraper.py
 ```
 
 This will:
-- Scrape ITU website (excluding news pages)
-- Create embeddings using sentence transformers
-- Build FAISS vector database
-- Test the search functionality
+- Scrape ITU content (student/progamme pages; news excluded)
+- Save JSON to `data/vectors/itu_scraped_data.json`
+- Create embeddings and FAISS index in `data/vectors/`
 
-### 2. Start the Chatbot
+## Course Database
+
+`data/courses/courses.db` is expected. If starting from CSV, create the DB:
 
 ```bash
-python app.py
+python tools/create_courses_db.py
 ```
 
-Then open your browser and go to: `http://localhost:5000`
+Inputs/outputs:
+- Input CSV: `data/courses/courses.csv`
+- Output DB: `data/courses/courses.db`
 
-## API Endpoints
+## Troubleshooting
 
-- `GET /` - Main chatbot interface
-- `POST /api/chat` - Send messages to chatbot
-- `GET /api/health` - Health check
-- `GET /api/history` - Get conversation history
-- `POST /api/search` - Search knowledge base
-- `GET /api/database/stats` - Get database statistics
+- No LLM responses: ensure Ollama is running or omit `.env` to use template responses.
+- Import errors / `No module named 'database'`:
+     - Cause: Running `python src/core/app.py` without `PYTHONPATH` pointing to `src`.
+     - Fix Option 2 (preferred here): `export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"`
+     - Alternative: use module run `python -m src.core.app`.
+- Missing vectors: run `python tools/run_scraper.py` to recreate FAISS files.
+- Missing courses DB: ensure `data/courses/courses.db` exists or run the CSV→SQLite step.
+
+## Notes
+
+- The app falls back to deterministic template responses when Ollama is unavailable.
+- All paths in code now target `data/` and `src/` — nothing under `archive/` is used.
+
+
+## LLM (Ollama) Quick Reference
+
+Pull and serve model (optional):
+```bash
+ollama serve &               # start server
+ollama pull gpt-oss:20b-cloud
+```
+Environment variables (via `.env`):
+```env
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=gpt-oss:20b-cloud
+```
+If Ollama is unavailable the pipeline falls back to template formatting (still functional).
 
 ## Example Questions
 
@@ -109,45 +165,30 @@ Try asking the chatbot:
 - "Tell me about student life at ITU"
 - "What are the admission requirements?"
 
-## Configuration
 
-### Scraper Settings
+## How It Works: RAG Pipeline
 
-In `scraper.py`, you can modify:
-- `max_pages`: Number of pages to scrape (default: 30)
-- `base_url`: ITU website URL
-- News filtering: Automatically skips news pages
+The chatbot uses a **Retrieval-Augmented Generation (RAG)** pipeline:
 
-### Vector Database Settings
+```
+User Question
+      ↓
+Query Classification (SQL/Vector/Hybrid)
+      ↓
+    ┌─────────┬─────────┐
+    ↓         ↓         ↓
+   SQL     Vector   Hybrid
+   DB      Search  (Both)
+    ↓         ↓         ↓
+    └─────────┴─────────┘
+         ↓
+    Merge Results
+         ↓
+    Format Context
+         ↓
+    LLM/Template
+    Generation
+         ↓
+    Final Response
+```
 
-In `vector_db.py`, you can modify:
-- `model_name`: Sentence transformer model (default: "all-MiniLM-L6-v2")
-- `max_length`: Text chunk size (default: 512)
-- `k`: Number of search results (default: 5)
-
-## Technologies Used
-
-- **Backend**: Flask, Python
-- **Web Scraping**: BeautifulSoup, Requests
-- **Vector Database**: FAISS
-- **Embeddings**: Sentence Transformers
-- **Frontend**: HTML, CSS, JavaScript
-- **Styling**: Modern CSS with gradients and animations
-
-## Notes
-
-- The scraper respects robots.txt and includes delays between requests
-- News pages are automatically filtered out to focus on core content
-- The vector database is built locally and can be reused
-- All scraped data is saved as JSON for inspection
-
-## Troubleshooting
-
-1. **Import errors**: Make sure all dependencies are installed
-2. **Scraping issues**: Check internet connection and ITU website availability
-3. **Vector database errors**: Ensure sufficient disk space for embeddings
-4. **Port conflicts**: Change port in `app.py` if 5000 is occupied
-
-## License
-
-MIT License - feel free to use and modify as needed.
