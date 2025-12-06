@@ -30,8 +30,9 @@ def main():
   # Step 1: Scrape the website
   print("\nStep 1: Scraping site...")
   scraper = ITUWebScraper()
-  scraped_data = scraper.scrape_all_pages(max_pages=None)  # No limit - scrape all pages
-
+  scraped_data = scraper.scrape_all_pages(max_pages=1)  # No limit - scrape all pages
+  print(scraped_data)
+  
   if not scraped_data:
     print("❌ No data scraped. Exiting.")
     return
@@ -43,18 +44,18 @@ def main():
   # Save URLs list for easy reference
   scraper.save_urls_list(os.path.join('data', 'itu_scraped_urls.txt'))
 
-  # Step 2: Store to SQLite
-  print("\nStep 2: Storing pages and chunks to SQLite (itu_content.db)...")
-  store = SQLStore(os.path.join('data', 'vectors', 'itu_content.db'))
-  total_chunks = 0
-  for page in scraped_data:
-    page_id = store.upsert_page(page)
-    chunks = chunk_text(page.get('full_text', ''), max_tokens=500, overlap=100)
-    indexed_chunks = [(i, ch) for i, ch in enumerate(chunks) if len(ch.split()) >= 20]
-    if indexed_chunks:
-      store.insert_chunks(page_id, indexed_chunks)
-      total_chunks += len(indexed_chunks)
-  print(f"Stored {len(scraped_data)} pages and {total_chunks} chunks")
+  # # Step 2: Store to SQLite
+  # print("\nStep 2: Storing pages and chunks to SQLite (itu_content.db)...")
+  # store = SQLStore(os.path.join('data', 'vectors', 'itu_content.db'))
+  # total_chunks = 0
+  # for page in scraped_data:
+  #   page_id = store.upsert_page(page)
+  #   chunks = chunk_text(page.get('full_text', ''), max_tokens=500, overlap=100)
+  #   indexed_chunks = [(i, ch) for i, ch in enumerate(chunks) if len(ch.split()) >= 20]
+  #   if indexed_chunks:
+  #     store.insert_chunks(page_id, indexed_chunks)
+  #     total_chunks += len(indexed_chunks)
+  # print(f"Stored {len(scraped_data)} pages and {total_chunks} chunks")
 
   # Step 3: Build vector index
   print("\nStep 3: Building FAISS vector database...")
