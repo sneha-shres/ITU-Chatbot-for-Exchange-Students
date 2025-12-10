@@ -426,7 +426,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ITUWebScraper:
-    def __init__(self, base_url: str = "https://en.itu.dk/Programmes/Exchange-students/Exchange-students-ITU/How-to-apply-to-become-exchange-student"):
+    def __init__(self, base_url: str = "https://en.itu.dk/Programmes/Exchange-students/Exchange-students-ITU"):
         self.ALLOWED_PATHS = ['/About-ITU', '/Research', '/Education', '/News', '/Contact', '/About-ITU/Press', '/About-ITU/Press/News-from-ITU']
         self.BLOCKED_PATHS = ['/News','/Event','/Campus-Life']
         self.BLOCKED_CLASSES = []#["skip-main", "nav-brand", "footer", "header", "social", "logo", "nav-brand", "nav-dropdown", "navigation", "sidebar", "social-links", "social-media"]
@@ -449,32 +449,42 @@ class ITUWebScraper:
         
         # Always allow the base URL
         if url == self.base_url or url.rstrip('/') == self.base_url.rstrip('/'):
-            pass  # Allow base URL to pass through
-        # REQUIRE: All other URLs must contain "exchange" (case-insensitive)
-        elif 'exchange' not in url.lower():
+        # if "en.itu.dk" not in url.lower():
+            pass
+        elif "Practical-informatio" in url:
+            return True
+        if "collapseexample" in url.lower():
             return False
+            #return False  # Allow base URL to pass through
+        # REQUIRE: All other URLs must contain "exchange" (case-insensitive)
+        if 'exchange' not in url.lower() or "programme" not in url.lower():
+            print()
+            return False
+        else:
+            print("URL passed exchange/programme filter:", url)
+            return True
         
         # Skip all news URLs
-        if url.startswith('https://en.itu.dk/News'):
-            return False
+        # if url.startswith('https://en.itu.dk/News'):
+        #     return False
         
-        if self.is_social_url(url):
-            return False
-        # Skip news article URLs from the old path
-        if '/About-ITU/Press/News-from-ITU/' in url: #and url != 'https://en.itu.dk/About-ITU/Press/News-from-ITU':
-            return False
+        # if self.is_social_url(url):
+        #     return False
+        # # Skip news article URLs from the old path
+        # if '/About-ITU/Press/News-from-ITU/' in url: #and url != 'https://en.itu.dk/About-ITU/Press/News-from-ITU':
+        #     return False
 
     
-        return (
-            # parsed.netloc == 'en.itu.dk' and
-            not any(ext in url.lower() for ext in ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.css', '.js']) and
-            '#' not in url and
-            'mailto:' not in url and
-            'tel:' not in url and
-            'https://itustudent' in url and
-            'news' not in url.lower() and 
-            'study-abroad' not in url.lower()
-        )
+        # return (
+        #     # parsed.netloc == 'en.itu.dk' and
+        #     not any(ext in url.lower() for ext in ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.css', '.js']) and
+        #     '#' not in url and
+        #     'mailto:' not in url and
+        #     'tel:' not in url and
+        #     'https://itustudent' in url and
+        #     'news' not in url.lower() and 
+        #     'study-abroad' not in url.lower()
+        # )
     
     def clean_text(self, text: str) -> str:
         """Clean and normalize text content"""
@@ -677,10 +687,11 @@ class ITUWebScraper:
     def is_relevant(self, url):
         """Check if URL is relevant"""
         return not any(path in url for path in self.BLOCKED_PATHS)
+    
 
     def fetch_url(self, url: str) -> Set[str]:
+        """ New version in this setup"""
         try:
-
             response = self.session.get(url, timeout=10)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -690,31 +701,74 @@ class ITUWebScraper:
             
             
             for link in soup.find_all('a', href=True): # get all hyperlink objects
-                 link_class = link.get("class", [])
+                link_class = link.get("class", [])
                  
                  # skip footer and navigation links
                 #  if self.is_footer_element(link):
                 #      continue
                  
                  # skip irrelevant classes
-                 if any(cls in link_class for cls in self.BLOCKED_CLASSES):
-                     continue
+                if any(cls in link_class for cls in self.BLOCKED_CLASSES):
+                    continue
 
-                 href = link.get('href') # get the link to next page
-                 if href.lower().endswith((".pdf", ".ashx", ".jpg", ".png", ".zip")):
-                     continue
+                href = link.get('href') # get the link to next page
+                if href.lower().endswith((".pdf", ".ashx", ".jpg", ".png", ".zip")):
+                    continue
 
-                 full_url = urljoin(url, href)
-             
-                 if self.is_valid_url(full_url) and self.is_relevant(full_url):
+                full_url = urljoin(url, href)
+       
+            
+                if self.is_valid_url(full_url) and self.is_relevant(full_url):
+                    print("Valid url found:", full_url)
                     links.add(full_url)
 
             logger.info(f"Found {len(links)} links from {url}")
+            
+            
             
             return links
         except Exception as e:
             logger.error(f"Error fetching {url}: {e}")
             return set()
+    
+
+    # def fetch_url(self, url: str) -> Set[str]:
+    #     try:
+
+    #         response = self.session.get(url, timeout=10)
+    #         response.raise_for_status()
+    #         soup = BeautifulSoup(response.content, 'html.parser')
+
+    #         links = set()
+    #         print("len", len(soup.find_all('a', href=True)))
+            
+            
+    #         for link in soup.find_all('a', href=True): # get all hyperlink objects
+    #              link_class = link.get("class", [])
+                 
+    #              # skip footer and navigation links
+    #             #  if self.is_footer_element(link):
+    #             #      continue
+                 
+    #              # skip irrelevant classes
+    #              if any(cls in link_class for cls in self.BLOCKED_CLASSES):
+    #                  continue
+
+    #              href = link.get('href') # get the link to next page
+    #              if href.lower().endswith((".pdf", ".ashx", ".jpg", ".png", ".zip")):
+    #                  continue
+
+    #              full_url = urljoin(url, href)
+             
+    #              if self.is_valid_url(full_url) and self.is_relevant(full_url):
+    #                 links.add(full_url)
+
+    #         logger.info(f"Found {len(links)} links from {url}")
+            
+    #         return links
+    #     except Exception as e:
+    #         logger.error(f"Error fetching {url}: {e}")
+    #         return set()
     
     def discover_urls(self, start_url: str) -> Set[str]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -725,32 +779,18 @@ class ITUWebScraper:
             logger.info(f"Starting to discover URLs from {start_url}")
             while urls_to_visit:
                 futures = {executor.submit(self.fetch_url, url): url for url in urls_to_visit}
-                print("All fuutress")
-                print(futures)
-                
-                
 
                 urls_to_visit = set() 
                 for future in as_completed(futures):
                     links = future.result()
+
                     new_links = links - self.visited_urls - discovered_urls
                     new_links = list(set(new_links))
-                    print('new links set', len(new_links))
-                
-                    
-                    for the_link in new_links:
-                        print(the_link)
-                    
                    
                     discovered_urls.update(new_links)
                     urls_to_visit.update(new_links)
                     self.visited_urls.update(links)
-                    print("All visited urls")
-                    print(self.visited_urls)
-                    print("urls to visit")
-                    print(urls_to_visit)
-                    
-            
+        
 
         return discovered_urls
 
@@ -769,6 +809,11 @@ class ITUWebScraper:
     
         
         scraped_data = []
+        print("urls to scrape")
+        print(len(urls_to_scrape))
+        print(urls_to_scrape)
+        print(set(urls_to_scrape))
+        
         
         for url in tqdm(urls_to_scrape, desc="Scraping pages"):
             content = self.scrape_page(url)

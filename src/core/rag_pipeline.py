@@ -14,6 +14,7 @@ import logging
 import os
 from database.vector_db import ITUVectorDatabase
 from database.course_db import CourseDatabase
+from core.reasoning_layer import CourseCombinationReasoner
 import requests
 # Load environment variables from .env if present
 try:
@@ -39,11 +40,14 @@ VECTOR_KEYWORDS = ['apply', 'application', 'admission', 'housing', 'deadline', '
 MIN_ECTS_KEYWORDS = ['minimum', 'least', 'lowest', 'fewest', 'smallest']
 
 
+
 class QueryType(Enum):
     """Query classification types."""
     SQL = "sql"  # Course-specific, structured queries
     VECTOR = "vector"  # General ITU info queries
     HYBRID = "hybrid"  # Queries spanning both domains
+    REASONING = "reasoning"  # Queries requiring combinatorial reasoning (e.g., course combinations)
+
 
 
 class RAGPipeline:
@@ -62,7 +66,10 @@ class RAGPipeline:
         """
         self.vector_db = vector_db
         self.course_db = course_db
-    # No OpenAI client — Ollama HTTP is used when configured
+
+        # Initialize reasoning layer for combination queries
+        self.reasoner = CourseCombinationReasoner(course_db=course_db)
+
         # Ollama support: optional local or remote Ollama server URL (e.g. http://localhost:11434)
         self.ollama_url = os.getenv('OLLAMA_URL')
         self.ollama_api_key = os.getenv('OLLAMA_API_KEY')
@@ -123,6 +130,22 @@ class RAGPipeline:
 
         # Detect minimum/least/lowest ECTS keywords
         has_min_ects = any(kw in ql for kw in MIN_ECTS_KEYWORDS)
+
+            
+        # Check for combination/reasoning queries (e.g., "which combinations sum to 30 ECTS")
+        is_combo_query, combo_ects = self.reasoner.is_combination_query(query)
+        print("is combo query", is_combo_query, combo_ects)
+        
+        
+        if is_combo_query and combo_ects is not None:
+            logger.debug(f"Detected combination query with target ECTS: {combo_ects}")
+            meta = {'reasoning_type': 'combination', 'target_ects': combo_ects}
+            # Extract filters if present
+            if language_match:
+                meta['language'] = language_match
+            if semester_match:
+                meta['semester'] = semester_match
+            return QueryType.REASONING, meta
 
         logger.debug(f"Classify query: '{q}' | course_code={extracted_course_code} | course_kw={has_course_kw} | min_ects={has_min_ects}")
 
@@ -367,6 +390,108 @@ class RAGPipeline:
         except Exception as e:
             logger.error(f"Error querying vector database (paginated): {e}")
             return []
+        
+    def recommend_courses_for_topic(
+        self,
+        topic: str,
+        target_ects: float = 15.0,
+        language: Optional[str] = None,
+        semester: Optional[str] = None,
+        sql_limit: int = 200,
+        top_k_for_reasoner: int = 60,
+        timeout_seconds: float = 1.5,
+    ) -> Dict:
+        """Recommend course combinations for a given topic and target ECTS.
+        Returns a dict similar to the reasoning result with keys:
+        - combinations: list of combos
+        - courses_used: list of candidate courses considered
+        - formatted_context: human-readable string
+        """
+        topic = (topic or '').strip()
+        if not topic:
+            return {'combinations': [], 'courses_used': [], 'formatted_context': ''}
+
+        # Build keyword list
+        tokens = [t for t in re.findall(r"\w+", topic.lower()) if len(t) > 2]
+        keywords = [t for t in tokens if t not in STOP_WORDS and t not in NOISY_NGRAMS]
+
+        candidates: List[Dict] = []
+        # SQL candidates from keyword search
+        if self.course_db:
+            try:
+                if keywords:
+                    candidates = self.course_db.search_by_keywords(keywords, limit=sql_limit)
+                if not candidates:
+                    candidates = self.course_db.search_courses(query=topic, limit=sql_limit)
+            except Exception:
+                candidates = []
+
+        # Filter candidates to courses with numeric ects <= target_ects
+        filtered = []
+        for c in candidates:
+            try:
+                ects = c.get('ects')
+                if ects is None:
+                    continue
+                ects_val = float(ects)
+            except Exception:
+                continue
+            if ects_val <= 0 or ects_val > target_ects:
+                continue
+            filtered.append(c)
+
+        # Rank by SQL relevance using existing helper
+        for c in filtered:
+            c['relevance_score'] = self._calculate_sql_relevance(c, topic, keywords)
+
+        filtered.sort(key=lambda x: x.get('relevance_score', 0.0), reverse=True)
+
+        # Limit to top candidates for combination search
+        candidates_for_reasoner = filtered[:top_k_for_reasoner]
+
+        # Use reasoner to find exact-sum combinations
+        try:
+            combos = self.reasoner.find_combinations(
+                target_ects=target_ects,
+                courses=candidates_for_reasoner,
+                max_combinations=200,
+                max_courses_per_combination=5,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception:
+            combos = []
+
+        # If exact combos found, format and return
+        if combos:
+            formatted = self.reasoner.format_combinations_for_context(combos)
+            return {'combinations': combos, 'courses_used': candidates_for_reasoner, 'formatted_context': formatted}
+
+        # Fallback greedy assembler: pick top-relevance courses until we reach target
+        greedy = []
+        total = 0.0
+        for c in candidates_for_reasoner:
+            ects_val = float(c.get('ects', 0))
+            if total + ects_val <= target_ects:
+                greedy.append(c)
+                total += ects_val
+            if abs(total - target_ects) < 1e-6:
+                break
+
+        if greedy and abs(total - target_ects) < 1e-6:
+            combo = {'courses': greedy, 'total_ects': total, 'course_count': len(greedy)}
+            formatted = self.reasoner.format_combinations_for_context([combo])
+            return {'combinations': [combo], 'courses_used': candidates_for_reasoner, 'formatted_context': formatted}
+
+        # No exact match — return top candidates as suggestions (not exact sum)
+        suggestion_lines = []
+        suggestion_lines.append(f"Could not find exact combinations summing to {target_ects} ECTS. Here are top relevant courses for '{topic}':")
+        for i, c in enumerate(filtered[:10], 1):
+            title = c.get('course_title', 'Unknown')
+            code = c.get('course_code', '')
+            ects = c.get('ects', '')
+            suggestion_lines.append(f"{i}. {title} ({code}) - {ects} ECTS")
+
+        return {'combinations': [], 'courses_used': candidates_for_reasoner, 'formatted_context': '\n'.join(suggestion_lines)}
     
     def _calculate_sql_relevance(self, course: Dict, query: str, keywords: List[str]) -> float:
         """Calculate relevance score for a course based on query keywords.
@@ -643,6 +768,10 @@ class RAGPipeline:
         sql_results = []
         vector_results = []
 
+        # Handle reasoning queries separately
+        if query_type == QueryType.REASONING:
+            return self._handle_reasoning_query(query, metadata)
+
         if query_type in [QueryType.SQL, QueryType.HYBRID]:
             sql_results = self.query_sql(query, metadata, k=sql_k, offset=sql_offset)
 
@@ -682,6 +811,57 @@ class RAGPipeline:
             merged_meta['vector_total'] = len(vector_results)
 
         return merged_meta
+
+    def _handle_reasoning_query(self, query: str, metadata: Dict) -> Dict:
+        """Handle reasoning queries (e.g., course combinations).
+        
+        Args:
+            query: User query string
+            metadata: Query metadata with reasoning information
+            
+        Returns:
+            Dictionary with reasoning results formatted for context
+        """
+        target_ects = metadata.get('target_ects')
+        if not target_ects:
+            return {
+                'sql_results': [],
+                'vector_results': [],
+                'query_type': 'reasoning',
+                'total_results': 0,
+                'primary_source': 'reasoning',
+                'context': 'Could not determine target ECTS value for combination query.',
+                'reasoning_results': None
+            }
+        
+        # Build filters from metadata
+        filters = {}
+        if metadata.get('language'):
+            filters['language'] = metadata['language']
+        if metadata.get('semester'):
+            filters['semester'] = metadata['semester']
+        if metadata.get('level'):
+            filters['level'] = metadata['level']
+        if metadata.get('exchange_related'):
+            filters['offered_exchange'] = metadata['exchange_related']
+        
+        # Use reasoning layer to find combinations
+        reasoning_result = self.reasoner.reason_about_query(query, target_ects, filters)
+        
+        # Format context for LLM
+        context = reasoning_result.get('formatted_context', 'No combinations found.')
+        
+        return {
+            'sql_results': reasoning_result.get('courses_used', []),
+            'vector_results': [],
+            'query_type': 'reasoning',
+            'total_results': len(reasoning_result.get('combinations', [])),
+            'primary_source': 'reasoning',
+            'context': context,
+            'reasoning_results': reasoning_result,
+            'target_ects': target_ects
+        }
+
     
     def generate_response(
         self,
