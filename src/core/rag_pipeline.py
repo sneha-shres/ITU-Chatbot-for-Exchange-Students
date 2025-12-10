@@ -1,8 +1,8 @@
 """
 RAG Pipeline for Chatbot_ITU
 
-Implements a Retrieval-Augmented Generation pipeline that intelligently combines
-structured SQL course data and unstructured FAISS vector data to provide
+Implements a Retrieval-Augmented Generation pipeline that uses
+vector similarity search over ITU documentation to provide
 comprehensive responses to student queries.
 """
 
@@ -13,7 +13,6 @@ import logging
 
 import os
 from database.vector_db import ITUVectorDatabase
-from database.course_db import CourseDatabase
 from core.reasoning_layer import CourseCombinationReasoner
 import requests
 # Load environment variables from .env if present
@@ -43,9 +42,7 @@ MIN_ECTS_KEYWORDS = ['minimum', 'least', 'lowest', 'fewest', 'smallest']
 
 class QueryType(Enum):
     """Query classification types."""
-    SQL = "sql"  # Course-specific, structured queries
     VECTOR = "vector"  # General ITU info queries
-    HYBRID = "hybrid"  # Queries spanning both domains
     REASONING = "reasoning"  # Queries requiring combinatorial reasoning (e.g., course combinations)
 
 
@@ -56,308 +53,56 @@ class RAGPipeline:
     def __init__(
         self,
         vector_db: ITUVectorDatabase = None,
-        course_db: CourseDatabase = None,
     ):
         """Initialize the RAG pipeline.
         
         Args:
             vector_db: Initialized ITUVectorDatabase instance
-            course_db: Initialized CourseDatabase instance
         """
         self.vector_db = vector_db
-        self.course_db = course_db
 
         # Initialize reasoning layer for combination queries
-        self.reasoner = CourseCombinationReasoner(course_db=course_db)
+        self.reasoner = CourseCombinationReasoner(vector_db=vector_db)
 
         # Ollama support: optional local or remote Ollama server URL (e.g. http://localhost:11434)
         self.ollama_url = os.getenv('OLLAMA_URL')
         self.ollama_api_key = os.getenv('OLLAMA_API_KEY')
 
         # Configurable defaults from environment
-        self.default_sql_k = int(os.getenv('RAG_SQL_K', '5'))
         self.default_vector_k = int(os.getenv('RAG_VECTOR_K', '3'))
         self.max_context_chars = int(os.getenv('RAG_MAX_CONTEXT_CHARS', '1000'))
-        self.max_sql_items = int(os.getenv('RAG_MAX_SQL_ITEMS', '5'))
         self.max_vector_items = int(os.getenv('RAG_MAX_VECTOR_ITEMS', '3'))
     
     def classify_query(self, query: str) -> Tuple[QueryType, Dict]:
-        """Classify a query to determine whether to use SQL, Vector, or Hybrid retrieval.
-        Tries a quick SQL probe when course-like patterns or course keywords are present.
+        """Classify a query to determine whether to use Vector or Reasoning retrieval.
         Returns: (QueryType, metadata)
         """
         q = (query or "").strip()
         ql = q.lower()
 
-        # Patterns
-        course_code_pattern = r'\b([A-Z]{2,}[A-Z0-9]*)\b'  # e.g. BDSA, BDSA101, KSADAPS1KU
-
-        # Extract explicit course code if present (highest priority)
-        course_code_match = re.search(course_code_pattern, query)
-        extracted_course_code = course_code_match.group(1) if course_code_match else None
-        
-        # Exclude common non-course-code uppercase words
-        excluded_codes = {'ECTS', 'IT', 'ITU', 'MSC', 'BSC', 'AI', 'ML', 'NLP', 'CV'}
-        if extracted_course_code and extracted_course_code.upper() in excluded_codes:
-            extracted_course_code = None
-        
-        has_course_kw = any(kw in ql for kw in COURSE_KEYWORDS)
-        has_exchange_kw = any(kw in ql for kw in EXCHANGE_KEYWORDS)
-        has_vector_kw = any(kw in ql for kw in VECTOR_KEYWORDS)
-
-        # Detect explicit ECTS mention (e.g., '15 ects' or '7,5 ECTS') and semesters
-        ects_value = None
-        ects_match = re.search(r"\b(\d{1,2}(?:[\.,]\d)?)\s*(?:ects)\b", ql)
-        if ects_match:
-            raw = ects_match.group(1).replace(',', '.')
-            try:
-                ects_value = float(raw)
-            except Exception:
-                ects_value = None
-        
-        semester_match = None
-        if 'autumn' in ql or 'fall' in ql:
-            semester_match = 'Autumn'
-        elif 'spring' in ql:
-            semester_match = 'Spring'
-
-        # Detect language mentions (e.g., 'english courses')
-        language_match = None
-        if 'english' in ql:
-            language_match = 'English'
-        elif 'danish' in ql or 'dansk' in ql:
-            language_match = 'Danish'
-
-        # Detect minimum/least/lowest ECTS keywords
-        has_min_ects = any(kw in ql for kw in MIN_ECTS_KEYWORDS)
-
-            
         # Check for combination/reasoning queries (e.g., "which combinations sum to 30 ECTS")
         is_combo_query, combo_ects = self.reasoner.is_combination_query(query)
-        print("is combo query", is_combo_query, combo_ects)
-        
         
         if is_combo_query and combo_ects is not None:
             logger.debug(f"Detected combination query with target ECTS: {combo_ects}")
             meta = {'reasoning_type': 'combination', 'target_ects': combo_ects}
+            
             # Extract filters if present
-            if language_match:
-                meta['language'] = language_match
-            if semester_match:
-                meta['semester'] = semester_match
+            if 'autumn' in ql or 'fall' in ql:
+                meta['semester'] = 'Autumn'
+            elif 'spring' in ql:
+                meta['semester'] = 'Spring'
+            
+            if 'english' in ql:
+                meta['language'] = 'English'
+            elif 'danish' in ql or 'dansk' in ql:
+                meta['language'] = 'Danish'
+            
             return QueryType.REASONING, meta
 
-        logger.debug(f"Classify query: '{q}' | course_code={extracted_course_code} | course_kw={has_course_kw} | min_ects={has_min_ects}")
-
-        # HIGHEST PRIORITY: If explicit course code found, look up directly (SQL only, ignore vector keywords)
-        if extracted_course_code:
-            logger.debug(f"Found explicit course code: {extracted_course_code}")
-            return QueryType.SQL, {'course_code': extracted_course_code}
-
-        # Special case: if user asks for min/least ECTS, handle it as a special SQL query
-        if has_min_ects:
-            qtype = QueryType.HYBRID if has_exchange_kw or has_vector_kw else QueryType.SQL
-            meta = {'sql_matches': 0, 'min_ects': True}
-            if language_match:
-                meta['language'] = language_match
-            logger.debug(f"Detected minimum ECTS query; classifying as {qtype} with min_ects sorting")
-            return qtype, meta
-
-        if ects_value is not None:
-            if self.course_db:
-                try:
-                    ects_probe = self.course_db.search_courses(ects=ects_value, limit=5)
-                    if ects_probe:
-                        qtype = QueryType.HYBRID if has_exchange_kw or has_vector_kw else QueryType.SQL
-                        meta = {'sql_matches': len(ects_probe), 'ects': ects_value}
-                        if language_match:
-                            meta['language'] = language_match
-                        logger.debug(f"ECTS probe matched {len(ects_probe)} rows; classifying as {qtype}")
-                        return qtype, meta
-                except Exception as e:
-                    logger.debug(f"ECTS probe failed in classify_query: {e}")
-
-            # If ECTS was mentioned but no matches found, still treat as SQL intent with ects hint
-            meta = {'sql_matches': 0, 'ects': ects_value}
-            if language_match:
-                meta['language'] = language_match
-            return QueryType.SQL, meta
-
-        if has_course_kw or semester_match:
-            if self.course_db:
-                try:
-                    # First try a direct probe across searchable fields
-                    probe_results = self.course_db.search_courses(query=q, limit=5)
-                    if probe_results:
-                        qtype = QueryType.HYBRID if has_exchange_kw or has_vector_kw else QueryType.SQL
-                        meta = {'sql_matches': len(probe_results)}
-                        if language_match:
-                            meta['language'] = language_match
-                        if ects_value is not None:
-                            meta['ects'] = ects_value
-                        logger.debug(f"SQL direct probe matched {len(probe_results)} rows; classifying as {qtype}")
-                        return qtype, meta
-
-                    # If direct probe failed, try n-gram title probes (more robust for partial titles)
-                    tokens = [t for t in re.findall(r"\w+", ql) if len(t) > 2]
-                    good_ngrams_found = False
-                    for n in range(min(4, len(tokens)), 0, -1):
-                        for i in range(len(tokens) - n + 1):
-                            ngram = ' '.join(tokens[i:i+n])
-                            ngram_lower = ngram.strip().lower()
-                            
-                            # Skip noisy n-grams that are unlikely to be useful as titles
-                            # Check if the ngram itself or any individual token is in NOISY_NGRAMS
-                            if ngram_lower in NOISY_NGRAMS:
-                                continue
-                            # Also check individual tokens to avoid ngrams like "the course" or "what is"
-                            ngram_tokens = ngram_lower.split()
-                            if any(token in NOISY_NGRAMS for token in ngram_tokens):
-                                continue
-                            
-                            try:
-                                title_matches = self.course_db.search_courses(course_title=ngram, limit=3)
-                                if title_matches:
-                                    good_ngrams_found = True
-                                    qtype = QueryType.HYBRID if has_exchange_kw or has_vector_kw else QueryType.SQL
-                                    meta = {'sql_matches': len(title_matches), 'probe_ngram': ngram}
-                                    if language_match:
-                                        meta['language'] = language_match
-                                    if ects_value is not None:
-                                        meta['ects'] = ects_value
-                                    logger.debug(f"Title n-gram probe '{ngram}' matched {len(title_matches)} rows; classifying as {qtype}")
-                                    return qtype, meta
-                            except Exception:
-                                # ignore individual probe errors and continue
-                                continue
-                    
-                    # If no good n-grams were found after filtering, don't set probe_ngram
-                    if not good_ngrams_found:
-                        logger.debug("No good n-grams found after filtering noisy n-grams")
-                except Exception as e:
-                    logger.debug(f"SQL probe failed in classify_query: {e}")
-
-            # If it looked like a course query but no SQL DB or matches, still favor SQL intent
-            if has_course_kw or semester_match:
-                meta = {'sql_matches': 0}
-                if language_match:
-                    meta['language'] = language_match
-                if ects_value is not None:
-                    meta['ects'] = ects_value
-                logger.debug("No SQL matches found but query looks course-related; returning SQL intent (best-effort)")
-                return QueryType.SQL, meta
-
-        # If vector-specific keywords or exchange-related keywords appear, pick vector
-        if has_exchange_kw or has_vector_kw:
-            logger.debug("Classifying as VECTOR based on exchange/vector keywords")
-            return QueryType.VECTOR, {}
-
-        # Ambiguous case: prefer Hybrid when both course and vector cues exist
-        if has_course_kw and has_vector_kw:
-            logger.debug("Classifying as HYBRID (both course and vector cues present)")
-            return QueryType.HYBRID, {}
-
-        # Default to VECTOR
-        logger.debug("Defaulting to VECTOR classification")
+        # Default to VECTOR for all other queries
+        logger.debug("Classifying as VECTOR")
         return QueryType.VECTOR, {}
-    
-    def query_sql(self, query: str, metadata: Dict, k: int = 5, offset: int = 0) -> List[Dict]:
-        """Query the SQL course database.
-        
-        Args:
-            query: User query string
-            metadata: Query metadata from classification
-            k: Maximum number of results
-            
-        Returns:
-            List of course dictionaries
-        """
-        print(metadata)
-        
-        if not self.course_db:
-            return []
-        
-        try:
-            # Extract keywords from query
-            keywords = re.findall(r'\b\w{3,}\b', query.lower())
-            keywords = [kw for kw in keywords if kw not in STOP_WORDS]
-            
-            # Special handling for minimum ECTS queries
-            if metadata.get("min_ects"):
-                all_courses = self.course_db.search_courses(limit=1000)
-                valid = [c for c in all_courses if c.get('ects') is not None and c.get('ects') > 0]
-                valid.sort(key=lambda x: x.get('ects', float('inf')))
-                return valid[:k]
-            
-            # Build search parameters
-            search_params = {"limit": k, "offset": offset}
-
-            # Check if this is a general "list all courses" type query
-            is_general_list = (
-                metadata.get("sql_matches", 0) == 0 and
-                not metadata.get("course_code") and
-                not metadata.get("probe_ngram") and
-                not metadata.get("ects") and
-                not metadata.get("semester") and
-                not metadata.get("language")
-            )
-            print("in general list")
-            print(is_general_list)
-            
-            # Apply metadata hints to search parameters (in priority order)
-            if metadata.get("course_code"):
-                search_params["course_code"] = metadata["course_code"]
-            elif metadata.get("probe_ngram") :
-                search_params["course_title"] = metadata.get("probe_ngram")
-            elif metadata.get("course_specific"):
-                search_params["course_title"] = query
-            elif is_general_list:
-#                 # General "show all courses" query - don't pass query param to get all courses
-#                 # Will return all courses sorted by relevance/date
-                pass
-            else:
-                search_params["query"] = query
-
-            # Apply optional filters
-            if metadata.get("language"):
-                search_params["language"] = metadata.get("language")
-            if metadata.get("semester"):
-                search_params["semester"] = metadata["semester"]
-            if metadata.get("level"):
-                search_params["level"] = metadata["level"]
-            if metadata.get("exchange_related"):
-                search_params["offered_exchange"] = True
-
-            # Handle ECTS filter
-            if metadata.get("ects") is not None:
-                try:
-                    search_params["ects"] = float(metadata.get("ects"))
-                except Exception:
-                    search_params["ects"] = metadata.get("ects")
-                # If only filtering by ECTS (no specific course), remove free-text query
-                if not search_params.get("course_code") and not search_params.get("course_title"):
-                    search_params.pop('query', None)
-            
-            # Remove free-text query if only using specific filters
-            if metadata.get("language") and not search_params.get("course_code") and not search_params.get("course_title"):
-                search_params.pop('query', None)
-
-            # Perform search
-            logger.info(f"SQL search params: {search_params}")
-            courses = self.course_db.search_courses(**search_params)
-            print(courses)
-            
-            
-            # Add relevance scores and sort
-            for course in courses:
-                course["relevance_score"] = self._calculate_sql_relevance(course, query, keywords)
-            courses.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-            
-            return courses[:k]
-            
-        except Exception as e:
-            logger.error(f"Error querying SQL database: {e}")
-            return []
     
     def query_vector(self, query: str, k: int = 5) -> List[Dict]:
         """Query the FAISS vector database.
@@ -391,226 +136,38 @@ class RAGPipeline:
             logger.error(f"Error querying vector database (paginated): {e}")
             return []
         
-    def recommend_courses_for_topic(
-        self,
-        topic: str,
-        target_ects: float = 15.0,
-        language: Optional[str] = None,
-        semester: Optional[str] = None,
-        sql_limit: int = 200,
-        top_k_for_reasoner: int = 60,
-        timeout_seconds: float = 1.5,
-    ) -> Dict:
-        """Recommend course combinations for a given topic and target ECTS.
-        Returns a dict similar to the reasoning result with keys:
-        - combinations: list of combos
-        - courses_used: list of candidate courses considered
-        - formatted_context: human-readable string
-        """
-        topic = (topic or '').strip()
-        if not topic:
-            return {'combinations': [], 'courses_used': [], 'formatted_context': ''}
-
-        # Build keyword list
-        tokens = [t for t in re.findall(r"\w+", topic.lower()) if len(t) > 2]
-        keywords = [t for t in tokens if t not in STOP_WORDS and t not in NOISY_NGRAMS]
-
-        candidates: List[Dict] = []
-        # SQL candidates from keyword search
-        if self.course_db:
-            try:
-                if keywords:
-                    candidates = self.course_db.search_by_keywords(keywords, limit=sql_limit)
-                if not candidates:
-                    candidates = self.course_db.search_courses(query=topic, limit=sql_limit)
-            except Exception:
-                candidates = []
-
-        # Filter candidates to courses with numeric ects <= target_ects
-        filtered = []
-        for c in candidates:
-            try:
-                ects = c.get('ects')
-                if ects is None:
-                    continue
-                ects_val = float(ects)
-            except Exception:
-                continue
-            if ects_val <= 0 or ects_val > target_ects:
-                continue
-            filtered.append(c)
-
-        # Rank by SQL relevance using existing helper
-        for c in filtered:
-            c['relevance_score'] = self._calculate_sql_relevance(c, topic, keywords)
-
-        filtered.sort(key=lambda x: x.get('relevance_score', 0.0), reverse=True)
-
-        # Limit to top candidates for combination search
-        candidates_for_reasoner = filtered[:top_k_for_reasoner]
-
-        # Use reasoner to find exact-sum combinations
-        try:
-            combos = self.reasoner.find_combinations(
-                target_ects=target_ects,
-                courses=candidates_for_reasoner,
-                max_combinations=200,
-                max_courses_per_combination=5,
-                timeout_seconds=timeout_seconds,
-            )
-        except Exception:
-            combos = []
-
-        # If exact combos found, format and return
-        if combos:
-            formatted = self.reasoner.format_combinations_for_context(combos)
-            return {'combinations': combos, 'courses_used': candidates_for_reasoner, 'formatted_context': formatted}
-
-        # Fallback greedy assembler: pick top-relevance courses until we reach target
-        greedy = []
-        total = 0.0
-        for c in candidates_for_reasoner:
-            ects_val = float(c.get('ects', 0))
-            if total + ects_val <= target_ects:
-                greedy.append(c)
-                total += ects_val
-            if abs(total - target_ects) < 1e-6:
-                break
-
-        if greedy and abs(total - target_ects) < 1e-6:
-            combo = {'courses': greedy, 'total_ects': total, 'course_count': len(greedy)}
-            formatted = self.reasoner.format_combinations_for_context([combo])
-            return {'combinations': [combo], 'courses_used': candidates_for_reasoner, 'formatted_context': formatted}
-
-        # No exact match — return top candidates as suggestions (not exact sum)
-        suggestion_lines = []
-        suggestion_lines.append(f"Could not find exact combinations summing to {target_ects} ECTS. Here are top relevant courses for '{topic}':")
-        for i, c in enumerate(filtered[:10], 1):
-            title = c.get('course_title', 'Unknown')
-            code = c.get('course_code', '')
-            ects = c.get('ects', '')
-            suggestion_lines.append(f"{i}. {title} ({code}) - {ects} ECTS")
-
-        return {'combinations': [], 'courses_used': candidates_for_reasoner, 'formatted_context': '\n'.join(suggestion_lines)}
-    
-    def _calculate_sql_relevance(self, course: Dict, query: str, keywords: List[str]) -> float:
-        """Calculate relevance score for a course based on query keywords.
-        Searches title, description, abstract, and course code.
-        
-        Args:
-            course: Course dictionary
-            query: Original query string
-            keywords: Extracted keywords
-            
-        Returns:
-            Relevance score (0.0 to 1.0)
-        """
-        score = 0.0
-        query_lower = query.lower()
-        
-        # Check course code match (exact or partial) — highest priority
-        course_code = (course.get("course_code") or "").lower()
-        if course_code and course_code in query_lower:
-            score += 0.5
-        
-        # Check title match
-        title = (course.get("course_title") or "").lower()
-        if title:
-            if any(kw in title for kw in keywords):
-                score += 0.4
-            if query_lower in title or title in query_lower:
-                score += 0.3
-        
-        # Check description AND abstract (search both fields comprehensively)
-        description = (course.get("description") or "").lower()
-        abstract = (course.get("abstract") or "").lower()
-        combined_text = description + " " + abstract
-        
-        if combined_text:
-            # Count keyword matches in description/abstract
-            keyword_matches = sum(1 for kw in keywords if kw in combined_text)
-            score += min(0.2, keyword_matches * 0.05)
-        
-        return min(1.0, score)
-    
     def merge_results(
         self,
-        sql_results: List[Dict],
         vector_results: List[Dict],
         query_type: QueryType
     ) -> Dict:
-        """Merge SQL and vector results into a unified context.
+        """Merge vector results into a unified context.
         
         Args:
-            sql_results: Results from SQL database
             vector_results: Results from vector database
-            query_type: Type of query (determines merge strategy)
+            query_type: Type of query
             
         Returns:
             Dictionary with merged context and metadata
         """
-        # Apply hybrid scoring and ranking for hybrid queries
-        if query_type == QueryType.HYBRID:
-            sql_results, vector_results = self._rank_hybrid_results(
-                sql_results, vector_results
-            )
-        
         # Apply context truncation to prevent token overflow
-        sql_results = self._truncate_context(sql_results, max_items=self.max_sql_items)
         vector_results = self._truncate_context(vector_results, max_items=self.max_vector_items)
         
         merged = {
-            "sql_results": sql_results,
             "vector_results": vector_results,
             "query_type": query_type.value,
-            "total_results": len(sql_results) + len(vector_results)
+            "total_results": len(vector_results)
         }
         
-        # Prioritize SQL results for factual course data
-        if query_type == QueryType.SQL:
-            merged["primary_source"] = "sql"
-            merged["context"] = self._format_sql_context(sql_results)
-        elif query_type == QueryType.VECTOR:
+        # Format context
+        if query_type == QueryType.VECTOR:
             merged["primary_source"] = "vector"
             merged["context"] = self._format_vector_context(vector_results)
-        else:  # HYBRID
-            merged["primary_source"] = "hybrid"
-            merged["context"] = self._format_hybrid_context(sql_results, vector_results)
+        elif query_type == QueryType.REASONING:
+            merged["primary_source"] = "reasoning"
+            merged["context"] = ""  # Will be set by _handle_reasoning_query
         
         return merged
-    
-    def _rank_hybrid_results(
-        self,
-        sql_results: List[Dict],
-        vector_results: List[Dict]
-    ) -> Tuple[List[Dict], List[Dict]]:
-        """Rank and score hybrid results using combined scoring.
-        
-        Args:
-            sql_results: SQL course results
-            vector_results: Vector search results
-            
-        Returns:
-            Tuple of (ranked_sql_results, ranked_vector_results)
-        """
-        sql_weight = 0.6
-        vector_weight = 0.4
-        
-        # Normalize and score SQL results
-        for result in sql_results:
-            score = result.get("relevance_score", 0.0)
-            result["hybrid_score"] = min(1.0, max(0.0, score)) * sql_weight
-        
-        # Normalize and score vector results
-        for result in vector_results:
-            score = result.get("similarity_score", 0.0)
-            result["hybrid_score"] = min(1.0, max(0.0, score)) * vector_weight
-        
-        # Sort by hybrid scores
-        sql_results.sort(key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
-        vector_results.sort(key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
-        
-        return sql_results, vector_results
     
     def _truncate_context(self, results: List[Dict], max_items: int = 5) -> List[Dict]:
         """Truncate context to prevent token overflow.
@@ -627,69 +184,6 @@ class RAGPipeline:
         
         # Keep top N results by score
         return results[:max_items]
-    
-    def _format_sql_context(self, courses: List[Dict]) -> str:
-        """Format SQL course results into context string.
-        
-        Args:
-            courses: List of course dictionaries
-            
-        Returns:
-            Formatted context string
-        """
-        if not courses:
-            return ""
-        
-        context_parts = []
-        for i, course in enumerate(courses, 1):
-            parts = []
-            
-            # Course title and code
-            title = course.get("course_title", "Unknown Course")
-            code = course.get("course_code", "")
-            if code:
-                parts.append(f"Course {i}: {title} ({code})")
-            else:
-                parts.append(f"Course {i}: {title}")
-            
-            # ECTS
-            ects = course.get("ects")
-            if ects:
-                parts.append(f"ECTS: {ects}")
-            
-            # Semester
-            semester = course.get("semester")
-            if semester:
-                parts.append(f"Semester: {semester}")
-            
-            # Level
-            level = course.get("level")
-            if level:
-                parts.append(f"Level: {level}")
-            
-            # Exchange availability
-            exchange = course.get("offered_exchange")
-            if exchange == "yes":
-                parts.append("Available for exchange students: Yes")
-            
-            # Description/Abstract
-            description = course.get("description") or course.get("abstract")
-            if description:
-                parts.append(f"Description: {description[:self.max_context_chars]}")
-            
-            # Teachers
-            teachers = course.get("teachers")
-            if teachers:
-                parts.append(f"Instructors: {teachers}")
-            
-            # Prerequisites
-            prereqs = course.get("formal_prerequisites")
-            if prereqs:
-                parts.append(f"Prerequisites: {prereqs}")
-            
-            context_parts.append("\n".join(parts))
-        
-        return "\n\n---\n\n".join(context_parts)
     
     def _format_vector_context(self, results: List[Dict]) -> str:
         """Format vector search results into context string.
@@ -717,37 +211,11 @@ class RAGPipeline:
         
         return "\n\n---\n\n".join(context_parts)
     
-    def _format_hybrid_context(self, sql_results: List[Dict], vector_results: List[Dict]) -> str:
-        """Format hybrid results (both SQL and vector) into context string.
-        
-        Args:
-            sql_results: SQL course results
-            vector_results: Vector search results
-            
-        Returns:
-            Formatted context string
-        """
-        parts = []
-        
-        if sql_results:
-            parts.append("=== COURSE INFORMATION ===")
-            parts.append(self._format_sql_context(sql_results))
-        
-        if vector_results:
-            if parts:
-                parts.append("\n\n=== GENERAL ITU INFORMATION ===")
-            else:
-                parts.append("=== GENERAL ITU INFORMATION ===")
-            parts.append(self._format_vector_context(vector_results))
-        
-        return "\n\n".join(parts)
-    
-    def retrieve(self, query: str, sql_k: int = None, sql_offset: int = 0, vector_k: int = None, vector_offset: int = 0) -> Dict:
+    def retrieve(self, query: str, vector_k: int = None, vector_offset: int = 0) -> Dict:
         """Main retrieval function that orchestrates the RAG pipeline.
         
         Args:
             query: User query string
-            sql_k: Number of SQL results to retrieve
             vector_k: Number of vector results to retrieve
             
         Returns:
@@ -756,53 +224,27 @@ class RAGPipeline:
 
         # Classify query
         query_type, metadata = self.classify_query(query)
-        print("query tpye", query_type)
 
         # Resolve defaults
-        if sql_k is None:
-            sql_k = self.default_sql_k
         if vector_k is None:
             vector_k = self.default_vector_k
 
         # Retrieve from appropriate sources
-        sql_results = []
         vector_results = []
 
         # Handle reasoning queries separately
         if query_type == QueryType.REASONING:
             return self._handle_reasoning_query(query, metadata)
 
-        if query_type in [QueryType.SQL, QueryType.HYBRID]:
-            sql_results = self.query_sql(query, metadata, k=sql_k, offset=sql_offset)
-
-        if query_type in [QueryType.VECTOR, QueryType.HYBRID]:
+        # Query vector DB
+        if query_type == QueryType.VECTOR:
             vector_results = self.query_vector_paginated(query, k=vector_k, offset=vector_offset)
         
         # Merge results
-        merged = self.merge_results(sql_results, vector_results, query_type)
+        merged = self.merge_results(vector_results, query_type)
 
-        # Add pagination totals where available
+        # Add pagination totals
         merged_meta = merged.copy()
-        # SQL total: attempt a count using the same metadata
-        try:
-            if self.course_db:
-                count_params = {
-                    'query': None,
-                    'course_code': metadata.get('course_code'),
-                    'course_title': metadata.get('probe_ngram') or (query if metadata.get('course_specific') else None),
-                    'semester': metadata.get('semester'),
-                    'level': metadata.get('level'),
-                    'ects': metadata.get('ects'),
-                    'offered_exchange': metadata.get('exchange_related'),
-                    'programme': None,
-                    'language': metadata.get('language')
-                }
-                sql_total = self.course_db.count_courses(**count_params)
-                merged_meta['sql_total'] = sql_total
-        except Exception:
-            merged_meta['sql_total'] = len(sql_results)
-
-        # Vector approximate total
         try:
             if self.vector_db:
                 vd_stats = self.vector_db.get_database_stats()
@@ -852,14 +294,14 @@ class RAGPipeline:
         context = reasoning_result.get('formatted_context', 'No combinations found.')
         
         return {
-            'sql_results': reasoning_result.get('courses_used', []),
             'vector_results': [],
             'query_type': 'reasoning',
             'total_results': len(reasoning_result.get('combinations', [])),
             'primary_source': 'reasoning',
             'context': context,
             'reasoning_results': reasoning_result,
-            'target_ects': target_ects
+            'target_ects': target_ects,
+            'courses_used': reasoning_result.get('courses_used', [])
         }
 
     
@@ -1080,58 +522,19 @@ class RAGPipeline:
         Returns:
             Template-based response
         """
-        query_type = context.get("query_type", "hybrid")
-        sql_results = context.get("sql_results", [])
+        query_type = context.get("query_type", "vector")
         vector_results = context.get("vector_results", [])
-        print(sql_results)
         
         response_parts = []
         
-        if query_type == "sql" and sql_results:
-            for i, course in enumerate(sql_results[:self.max_sql_items], 1):
-                title = course.get("course_title", "Unknown")
-                code = course.get("course_code", "")
-                ects = course.get("ects", "")
-                semester = course.get("semester", "")
-                
-                course_info = f"{i}. {title}"
-                if code:
-                    course_info += f" ({code})"
-                if ects:
-                    course_info += f" - {ects} ECTS"
-                if semester:
-                    course_info += f" - {semester}"
-                
-                response_parts.append(course_info)
-        
-        elif query_type == "vector" and vector_results:
+        if query_type == "vector" and vector_results:
             best_result = vector_results[0]
             response_parts.append(best_result.get("text", "")[:self.max_context_chars])
-        
-        elif query_type == "hybrid":
-            if sql_results:
-                response_parts.append("Relevant Courses:")
-                for i, course in enumerate(sql_results[:self.max_sql_items], 1):
-                    title = course.get("course_title", "Unknown")
-                    code = course.get("course_code", "")
-                    ects = course.get("ects", "")
-                    semester = course.get("semester", "")
-                    
-                    course_info = f"{i}. {title}"
-                    if code:
-                        course_info += f" ({code})"
-                    if ects:
-                        course_info += f" - {ects} ECTS"
-                    if semester:
-                        course_info += f" - {semester}"
-                    
-                    response_parts.append(course_info)
-                
-                response_parts.append("")  # Blank line separator
-            
-            if vector_results:
-                response_parts.append("General Information:")
-                response_parts.append(vector_results[0].get("text", "")[:self.max_context_chars])
+        elif query_type == "reasoning":
+            # Use the context from reasoning layer
+            reasoning_context = context.get("context", "")
+            if reasoning_context:
+                response_parts.append(reasoning_context)
         
         if not response_parts:
             return "I couldn't find specific information to answer your question. Could you try rephrasing it?"

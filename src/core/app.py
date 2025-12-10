@@ -2,14 +2,14 @@
 ITU Chatbot Flask Application
 
 A web-based chatbot for answering IT University of Copenhagen (ITU) student questions
-using a Retrieval-Augmented Generation (RAG) pipeline that combines:
-- SQL course database queries
+using a Retrieval-Augmented Generation (RAG) pipeline with:
 - Vector similarity search over ITU documentation
 - LLM generation via Ollama for natural language responses
+- Reasoning layer for complex queries
 
 Features:
-- Hybrid retrieval combining structured and unstructured data
-- Intelligent query classification (SQL/Vector/Hybrid)
+- Vector-based retrieval
+- Intelligent query classification (Vector/Reasoning)
 - Optional Ollama LLM backend with template fallback
 - RESTful API for chat, search, and diagnostics
 - CORS-enabled for cross-origin requests
@@ -41,7 +41,6 @@ from flask_cors import CORS
 
 # Project modules
 from database.vector_db import ITUVectorDatabase
-from database.course_db import CourseDatabase
 from core.rag_pipeline import RAGPipeline
 
 # ============================================================================
@@ -69,13 +68,11 @@ class Chatbot:
         
         Sets up:
         - Vector database (FAISS embeddings)
-        - Course database (SQLite)
         - RAG pipeline (query classification + retrieval + generation)
         - Ollama LLM connection
         """
         self.conversation_history = []
         self.vector_db = None
-        self.course_db = None
         self.rag_pipeline = None
         self.ollama_url = os.getenv('OLLAMA_URL')
         self.ollama_api_key = os.getenv('OLLAMA_API_KEY')
@@ -86,7 +83,7 @@ class Chatbot:
         self.initialize_rag_pipeline()
     
     def load_databases(self):
-        """Load both vector and course databases."""
+        """Load vector database."""
         try:
             index_path = os.path.join('data', 'vectors', 'itu_vector_index.faiss')
             metadata_path = os.path.join('data', 'vectors', 'itu_metadata.pkl')
@@ -98,15 +95,6 @@ class Chatbot:
                 print("⚠️ Vector database not found.")
         except Exception as e:
             print(f"❌ Error loading vector database: {e}")
-        
-        try:
-            self.course_db = CourseDatabase()
-            if self.course_db.db_path:
-                print("✅ Course database loaded successfully")
-            else:
-                print("⚠️ Course database not found.")
-        except Exception as e:
-            print(f"❌ Error loading course database: {e}")
     
     def setup_ollama(self):
         """Configure Ollama as the LLM backend and test connectivity."""
@@ -138,7 +126,6 @@ class Chatbot:
         try:
             self.rag_pipeline = RAGPipeline(
                 vector_db=self.vector_db,
-                course_db=self.course_db,
             )
             print("✅ RAG pipeline initialized successfully")
         except Exception as e:
@@ -278,7 +265,10 @@ def search_knowledge():
         if not query:
             return jsonify({'error': 'Query cannot be empty'}), 400
         
-        results = chatbot.search_knowledge_base(query, k=5)
+        if not chatbot.vector_db:
+            return jsonify({'error': 'Vector database not available'}), 404
+        
+        results = chatbot.vector_db.search(query, k=5)
         
         return jsonify({
             'query': query,
@@ -291,12 +281,11 @@ def search_knowledge():
 
 @app.route('/api/database/stats')
 def get_database_stats():
-    """Get database statistics for both vector and course databases.
+    """Get database statistics for vector database.
     
     Returns statistics on loaded databases and RAG pipeline status:
         {
             "vector_db": {...},
-            "course_db": {...},
             "rag_pipeline": {...}
         }
     """
@@ -308,12 +297,6 @@ def get_database_stats():
     else:
         stats['vector_db'] = {'error': 'Vector database not loaded'}
     
-    # Course database stats
-    if chatbot.course_db and chatbot.course_db.db_path:
-        stats['course_db'] = chatbot.course_db.get_database_stats()
-    else:
-        stats['course_db'] = {'error': 'Course database not loaded'}
-    
     # RAG pipeline status
     stats['rag_pipeline'] = {
         'initialized': chatbot.rag_pipeline is not None,
@@ -321,91 +304,6 @@ def get_database_stats():
     }
     
     return jsonify(stats)
-
-
-# ============================================================================
-# ROUTES: COURSE SEARCH
-# ============================================================================
-
-@app.route('/api/courses/search', methods=['POST'])
-def search_courses():
-    """Search courses using the course database.
-    
-    Request body:
-        {
-            "query": "machine learning",
-            "course_code": "KSADAPS1KU",
-            "semester": "Autumn 2026",
-            "level": "MSc",
-            "offered_exchange": true,
-            "limit": 10
-        }
-    """
-    try:
-        data = request.get_json()
-        query = data.get('query', '').strip()
-        course_code = data.get('course_code', '').strip()
-        semester = data.get('semester', '').strip()
-        level = data.get('level', '').strip()
-        offered_exchange = data.get('offered_exchange')
-        limit = data.get('limit', 10)
-        
-        if not chatbot.course_db or not chatbot.course_db.db_path:
-            return jsonify({'error': 'Course database not available'}), 404
-        
-        # Build search parameters
-        search_params = {'limit': limit}
-        
-        if query:
-            search_params['query'] = query
-        if course_code:
-            search_params['course_code'] = course_code
-        if semester:
-            search_params['semester'] = semester
-        if level:
-            search_params['level'] = level
-        if offered_exchange is not None:
-            search_params['offered_exchange'] = bool(offered_exchange)
-        
-        courses = chatbot.course_db.search_courses(**search_params)
-        
-        return jsonify({
-            'query': query,
-            'courses': courses,
-            'total_results': len(courses)
-        })
-    
-    except Exception as e:
-        return jsonify({'error': f'An error occurred during course search: {str(e)}'}), 500
-
-@app.route('/api/courses/exchange', methods=['GET'])
-def get_exchange_courses():
-    """Get all courses available for exchange students.
-    
-    Query parameters:
-        - semester: Filter by semester (e.g., "Autumn 2026")
-        - limit: Maximum number of results (default: 20)
-    """
-    try:
-        semester = request.args.get('semester', '').strip()
-        limit = int(request.args.get('limit', 20))
-        
-        if not chatbot.course_db or not chatbot.course_db.db_path:
-            return jsonify({'error': 'Course database not available'}), 404
-        
-        courses = chatbot.course_db.get_exchange_courses(
-            semester=semester if semester else None,
-            limit=limit
-        )
-        
-        return jsonify({
-            'semester': semester,
-            'courses': courses,
-            'total_results': len(courses)
-        })
-    
-    except Exception as e:
-        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
 
 
 # ============================================================================
@@ -421,10 +319,10 @@ def classify_query():
             "query": "What machine learning courses are available?"
         }
     
-    Returns classification (SQL/Vector/Hybrid) and metadata:
+    Returns classification (Vector/Reasoning) and metadata:
         {
             "query": "...",
-            "query_type": "sql|vector|hybrid",
+            "query_type": "vector|reasoning",
             "metadata": {...}
         }
     """
@@ -457,13 +355,11 @@ def rag_retrieve():
     Request body:
         {
             "query": "...",
-            "sql_k": 5,           // Number of SQL results
             "vector_k": 3,        // Number of vector results
-            "sql_offset": 0,
             "vector_offset": 0
         }
     
-    Returns combined context from both SQL and vector searches.
+    Returns context from vector search.
     """
     try:
         data = request.get_json()
@@ -476,20 +372,10 @@ def rag_retrieve():
             return jsonify({'error': 'RAG pipeline not initialized'}), 404
 
         # Allow overriding retrieval pagination via request body or environment defaults
-        sql_k = data.get('sql_k')
-        sql_offset = data.get('sql_offset', 0)
         vector_k = data.get('vector_k')
         vector_offset = data.get('vector_offset', 0)
 
         # Convert to ints if provided
-        try:
-            sql_k = int(sql_k) if sql_k is not None else None
-        except Exception:
-            sql_k = None
-        try:
-            sql_offset = int(sql_offset)
-        except Exception:
-            sql_offset = 0
         try:
             vector_k = int(vector_k) if vector_k is not None else None
         except Exception:
@@ -499,7 +385,7 @@ def rag_retrieve():
         except Exception:
             vector_offset = 0
 
-        merged = chatbot.rag_pipeline.retrieve(query, sql_k=sql_k, sql_offset=sql_offset, vector_k=vector_k, vector_offset=vector_offset)
+        merged = chatbot.rag_pipeline.retrieve(query, vector_k=vector_k, vector_offset=vector_offset)
 
         return jsonify({
             'query': query,

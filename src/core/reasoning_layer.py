@@ -23,13 +23,13 @@ COMBINATION_KEYWORDS = [
 class CourseCombinationReasoner:
     """Reasoning engine for finding course combinations that meet ECTS requirements."""
     
-    def __init__(self, course_db=None):
+    def __init__(self, vector_db=None):
         """Initialize the reasoning layer.
         
         Args:
-            course_db: CourseDatabase instance for querying courses
+            vector_db: ITUVectorDatabase instance for querying course information
         """
-        self.course_db = course_db
+        self.vector_db = vector_db
         # simple in-memory cache for (target_scaled, course_codes_tuple, max_courses_per_combination)
         self._combo_cache = {}
     
@@ -249,7 +249,10 @@ class CourseCombinationReasoner:
         filters: Optional[Dict] = None,
         limit: int = 200
     ) -> List[Dict]:
-        """Get all courses that could potentially be used in combinations.
+        """Get all courses from vector DB that could be used in combinations.
+        
+        This method searches the vector DB for course-related content and
+        extracts structured course information (ECTS, title, code, etc.)
         
         Args:
             target_ects: Target ECTS value (used to filter out courses that are too large)
@@ -259,74 +262,120 @@ class CourseCombinationReasoner:
         Returns:
             List of course dictionaries
         """
-        if not self.course_db:
-            logger.warning("Course database not available for combination reasoning")
+        if not self.vector_db:
+            logger.warning("Vector database not available for combination reasoning")
             return []
         
         try:
-            # Build search parameters
-            search_params = {'limit': limit}
-
-            # Apply filters if provided (pass them to SQL search)
+            # Search vector DB for course-related content
+            search_query = "course ECTS credits"
             if filters:
                 if filters.get('semester'):
-                    search_params['semester'] = filters['semester']
+                    search_query += f" {filters['semester']}"
                 if filters.get('language'):
-                    search_params['language'] = filters['language']
-                if filters.get('level'):
-                    search_params['level'] = filters['level']
-                if filters.get('offered_exchange') is not None:
-                    search_params['offered_exchange'] = filters['offered_exchange']
-
-            # Get candidate courses from SQL DB using the provided filters
-            all_courses = self.course_db.search_courses(**search_params)
-
-            # Extra verification: ensure courses actually match the requested filters
-            def matches_filters(course: Dict) -> bool:
-                if not filters:
-                    return True
-                # language match (case-insensitive substring)
-                if filters.get('language'):
-                    lang = (course.get('language') or '')
-                    if filters['language'].lower() not in lang.lower():
-                        return False
-                # semester match (case-insensitive substring)
-                if filters.get('semester'):
-                    sem = (course.get('semester') or '')
-                    if filters['semester'].lower() not in sem.lower():
-                        return False
-                # level
-                if filters.get('level'):
-                    lvl = (course.get('level') or '')
-                    if filters['level'].lower() not in lvl.lower():
-                        return False
-                # offered_exchange
-                if filters.get('offered_exchange') is not None:
-                    oe = course.get('offered_exchange')
-                    if filters['offered_exchange']:
-                        if not oe or str(oe).lower() != 'yes':
-                            return False
-                    else:
-                        # filter explicitly requiring not offered_exchange
-                        if oe and str(oe).lower() == 'yes':
-                            return False
-                return True
-
-            # Filter out courses with ECTS larger than target (they can't be part of a combination)
-            # and ensure they match requested filters
-            valid_courses = [
-                c for c in all_courses
-                if c.get('ects') is not None
-                and isinstance(c.get('ects'), (int, float))
-                and 0 < c.get('ects') <= target_ects
-                and matches_filters(c)
-            ]
-
-            return valid_courses
+                    search_query += f" {filters['language']}"
+            
+            # Get more results to have enough candidates
+            vector_results = self.vector_db.search(query=search_query, k=limit * 2)
+            
+            # Extract course information from vector results
+            courses = []
+            for result in vector_results:
+                text = result.get('text', '')
+                title = result.get('title', '')
+                
+                # Try to extract course information from the text
+                course = self._extract_course_from_text(text, title, result)
+                if course and course.get('ects'):
+                    ects_val = float(course.get('ects', 0))
+                    if 0 < ects_val <= target_ects:
+                        # Apply filters
+                        if self._matches_filters(course, filters):
+                            courses.append(course)
+            
+            return courses[:limit]
             
         except Exception as e:
             logger.error(f"Error retrieving courses for combinations: {e}")
             return []
+
+    def _extract_course_from_text(self, text: str, title: str, metadata: Dict) -> Optional[Dict]:
+        """Extract structured course information from vector DB text.
+        
+        This is a simplified extractor. You may need to enhance this
+        based on how course information is stored in your vector DB.
+        """
+        course = {
+            'course_title': title or '',
+            'course_code': '',
+            'ects': None,
+            'semester': '',
+            'language': '',
+            'level': '',
+            'offered_exchange': None,
+            'description': text[:500]  # First 500 chars as description
+        }
+        
+        # Try to extract ECTS (look for patterns like "7.5 ECTS", "15 ECTS", etc.)
+        ects_match = re.search(r'(\d{1,2}(?:[\.,]\d)?)\s*(?:ECTS|ects|credits)', text, re.IGNORECASE)
+        if ects_match:
+            try:
+                course['ects'] = float(ects_match.group(1).replace(',', '.'))
+            except:
+                pass
+        
+        # Try to extract course code (patterns like "BDSA", "KSADAPS1KU", etc.)
+        code_match = re.search(r'\b([A-Z]{2,}[A-Z0-9]*)\b', text)
+        if code_match:
+            excluded = {'ECTS', 'IT', 'ITU', 'MSC', 'BSC', 'AI', 'ML', 'NLP', 'CV'}
+            code = code_match.group(1)
+            if code not in excluded:
+                course['course_code'] = code
+        
+        # Extract semester if mentioned
+        if 'autumn' in text.lower() or 'fall' in text.lower():
+            course['semester'] = 'Autumn'
+        elif 'spring' in text.lower():
+            course['semester'] = 'Spring'
+        
+        # Extract language
+        if 'english' in text.lower():
+            course['language'] = 'English'
+        elif 'danish' in text.lower() or 'dansk' in text.lower():
+            course['language'] = 'Danish'
+        
+        # Only return if we found at least ECTS value
+        if course['ects'] is not None:
+            return course
+        return None
+
+    def _matches_filters(self, course: Dict, filters: Optional[Dict]) -> bool:
+        """Check if a course matches the provided filters."""
+        if not filters:
+            return True
+        
+        if filters.get('language'):
+            lang = (course.get('language') or '').lower()
+            if filters['language'].lower() not in lang:
+                return False
+        
+        if filters.get('semester'):
+            sem = (course.get('semester') or '').lower()
+            if filters['semester'].lower() not in sem:
+                return False
+        
+        if filters.get('level'):
+            lvl = (course.get('level') or '').lower()
+            if filters['level'].lower() not in lvl:
+                return False
+        
+        if filters.get('offered_exchange') is not None:
+            oe = course.get('offered_exchange')
+            if filters['offered_exchange']:
+                if not oe or str(oe).lower() != 'yes':
+                    return False
+        
+        return True
     
     def format_combinations_for_context(self, combinations: List[Dict]) -> str:
         """Format combination results into a context string for LLM.
