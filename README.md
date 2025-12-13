@@ -1,9 +1,6 @@
 # ITU Chatbot (RAG + Ollama)
 
-Answer ITU student questions using a Retrieval-Augmented Generation (RAG) pipeline that combines:
-- SQL course database lookups (SQLite)
-- Vector search over scraped ITU content (FAISS + SentenceTransformers)
-- Optional LLM generation via Ollama (local) with graceful fallback
+Answer ITU student questions using a vanilla Retrieval-Augmented Generation (RAG) pipeline.
 
 ## Project Structure
 
@@ -133,7 +130,6 @@ Inputs/outputs:
      - Fix Option 2 (preferred here): `export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"`
      - Alternative: use module run `python -m src.core.app`.
 - Missing vectors: run `python tools/run_scraper.py` to recreate FAISS files.
-- Missing courses DB: ensure `data/courses/courses.db` exists or run the CSV→SQLite step.
 
 ## Notes
 
@@ -164,31 +160,3 @@ Try asking the chatbot:
 - "What research opportunities are available?"
 - "Tell me about student life at ITU"
 - "What are the admission requirements?"
-
-
-## How It Works: RAG Pipeline
-
-The chatbot uses a **Retrieval-Augmented Generation (RAG)** pipeline:
-
-```
-User Question
-      ↓
-Query Classification (SQL/Vector/Hybrid)
-      ↓
-    ┌─────────┬─────────┐
-    ↓         ↓         ↓
-   SQL     Vector   Hybrid
-   DB      Search  (Both)
-    ↓         ↓         ↓
-    └─────────┴─────────┘
-         ↓
-    Merge Results
-         ↓
-    Format Context
-         ↓
-    LLM/Template
-    Generation
-         ↓
-    Final Response
-```
-

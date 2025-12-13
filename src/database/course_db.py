@@ -1,7 +1,6 @@
 """
 SQL Database Interface for Course Data
 
-Provides functions to query the courses database for structured course information.
 """
 
 import sqlite3
@@ -14,19 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class CourseDatabase:
-    """Interface for querying the courses SQLite database."""
     
     def __init__(self, db_path: str = None):
-        """Initialize the course database connection.
-        Args:
-            db_path: Path to the courses SQLite database file. If None, resolve common locations.
-        """
         from pathlib import Path
-        # If caller provided a path, try that first
         if db_path:
             self.db_path = str(Path(db_path).expanduser())
         else:
-            # Try a list of candidate paths relative to the repo and cwd
             repo_root = Path(__file__).parent.parent.parent.resolve()  # up to repo root from src/database/
             candidates = [
                 repo_root / "data" / "courses" / "courses.db",
@@ -45,7 +37,6 @@ class CourseDatabase:
         self._check_database_exists()
     
     def _check_database_exists(self):
-        """Check if the database file exists."""
         if not self.db_path or not os.path.exists(self.db_path):
             logger.warning(f"Course database not found. Tried path: {self.db_path}")
             self.db_path = None
@@ -75,20 +66,6 @@ class CourseDatabase:
         offset: int = 0
     ) -> List[Dict]:
         """Search for courses matching the given criteria.
-        
-        Args:
-            query: General text search across title, description, abstract
-            course_code: Exact course code match
-            course_title: Partial title match
-            semester: Semester filter (e.g., "Autumn 2026", "Spring 2026")
-            level: Level filter (e.g., "BSc", "MSc")
-            ects: ECTS credit points
-            offered_exchange: Filter by exchange student availability
-            programme: Programme name filter
-            limit: Maximum number of results
-            
-        Returns:
-            List of course dictionaries matching the criteria
         """
         if not self.db_path:
             return []
@@ -194,12 +171,6 @@ class CourseDatabase:
     
     def get_course_by_code(self, course_code: str) -> Optional[Dict]:
         """Get a specific course by its course code.
-        
-        Args:
-            course_code: The course code (e.g., "BDSA", "DSYS")
-            
-        Returns:
-            Course dictionary or None if not found
         """
         results = self.search_courses(course_code=course_code, limit=1)
         return results[0] if results else None
@@ -286,13 +257,6 @@ class CourseDatabase:
     
     def get_exchange_courses(self, semester: str = None, limit: int = 20) -> List[Dict]:
         """Get all courses available for exchange students.
-        
-        Args:
-            semester: Optional semester filter
-            limit: Maximum number of results
-            
-        Returns:
-            List of courses available for exchange students
         """
         return self.search_courses(
             offered_exchange=True,
@@ -302,13 +266,6 @@ class CourseDatabase:
     
     def search_by_keywords(self, keywords: List[str], limit: int = 10) -> List[Dict]:
         """Search courses using multiple keywords.
-        
-        Args:
-            keywords: List of keywords to search for
-            limit: Maximum number of results
-            
-        Returns:
-            List of matching courses
         """
         if not keywords:
             return []
@@ -319,21 +276,11 @@ class CourseDatabase:
     
     def get_courses_by_programme(self, programme: str, limit: int = 50) -> List[Dict]:
         """Get all courses for a specific programme.
-        
-        Args:
-            programme: Programme name
-            limit: Maximum number of results
-            
-        Returns:
-            List of courses in the programme
         """
         return self.search_courses(programme=programme, limit=limit)
     
     def get_database_stats(self) -> Dict:
         """Get statistics about the courses database.
-        
-        Returns:
-            Dictionary with database statistics
         """
         if not self.db_path:
             return {"error": "Database not available"}

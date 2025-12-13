@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Parse LearnIT (Moodle) course HTML files and extract structured fields.
-
-- Inputs: a folder with .html files (downloaded course pages)
-- Outputs: JSON and CSV files with extracted fields
-- Parsing: BeautifulSoup (bs4), robust to minor structural differences
-
-Set INPUT_DIR, OUT_JSON, and OUT_CSV below.
-"""
 
 import copy
 import csv
@@ -20,16 +11,9 @@ from typing import Dict, List, Optional, Tuple, Iterable
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
-# ---------------------------------------
-# Configuration: set your paths here
-# ---------------------------------------
 INPUT_DIR = "Courses/course_pages"           
 OUT_JSON = "data/courses/courses.json"      
 OUT_CSV  = "data/courses/courses.csv"      
-
-# ---------------------------
-# Helpers: text normalization
-# ---------------------------
 
 def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
@@ -64,10 +48,6 @@ def make_label_regex(labels: Iterable[str]) -> re.Pattern:
     escaped = [re.escape(l) for l in labels]
     pattern = r"(^|\b|\s)(" + "|".join(escaped) + r")(\b|:|\s|$)"
     return re.compile(pattern, flags=re.IGNORECASE)
-
-# ---------------------------------------
-# Section extraction by heading label(s)
-# ---------------------------------------
 
 def soup_new_fragment():
     frag = BeautifulSoup("", "html.parser")
@@ -163,10 +143,6 @@ def extract_list_items(container: Tag) -> List[str]:
                 items.append(t)
     return items
 
-# ---------------------------------------
-# Field-specific extractors
-# ---------------------------------------
-
 def extract_title(soup: BeautifulSoup) -> Optional[str]:
     for tag_name in ["h1", "h2"]:
         h = soup.find(tag_name)
@@ -182,10 +158,6 @@ def clean_title(t: str) -> str:
     return t
 
 def extract_semester_block(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
-    """
-    From the 'Course semester' section, parse Semester, Start, End when present.
-    Also looks for semester dates anywhere on the page in row format.
-    """
     section = extract_section_container(soup, ["Course semester", "COURSE SEMESTER"])
     result = {"semester_label": None, "start": None, "end": None}
     
@@ -231,7 +203,6 @@ def extract_semester_block(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
             if m:
                 result["end"] = m.group(1)
     
-    # Global fallback: look for semester dates anywhere on page in row format
     if not result["start"] or not result["end"]:
         for row in soup.find_all("div", class_="row"):
             cols = row.find_all("div", class_="col-md-12")
@@ -394,10 +365,6 @@ def extract_ects(soup: BeautifulSoup) -> Optional[str]:
         return m2.group(1).replace(",", ".")
     
     return None
-
-# ---------------------------------------
-# Key–value parsing utilities
-# ---------------------------------------
 
 def extract_kv_from_section(section: Tag) -> Dict[str, str]:
     """
@@ -608,10 +575,6 @@ def extract_section_container(soup: BeautifulSoup, labels: Iterable[str]) -> Opt
         return None
     return collect_section_after_heading(heading)
 
-# ---------------------------------------
-# Rich section helpers and broader scraping
-# ---------------------------------------
-
 def normalize_heading_label(label: str) -> str:
     label = norm_space(label).lower()
     label = re.sub(r"[^a-z0-9]+", "_", label)
@@ -746,7 +709,6 @@ def extract_assessment(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
                 if exam_variation_match:
                     exam_variation = norm_space(exam_variation_match.group(1))
     
-    # Fallback: look for strong tags with exam info anywhere on page
     if not exam_type or not exam_variation:
         for strong in soup.find_all("strong"):
             text = text_of(strong).lower()
@@ -837,10 +799,6 @@ def extract_all_sections_map(soup: BeautifulSoup) -> Dict[str, Dict]:
             sections[key] = entry
     return sections
 
-# ---------------------------------------
-# Main parsing for a single file
-# ---------------------------------------
-
 def parse_course_html(html: str, source_path: str) -> Dict:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -914,10 +872,6 @@ def parse_course_html(html: str, source_path: str) -> Dict:
         "emails": emails,
         "all_sections": all_sections,
     }
-
-# ---------------------------------------
-# I/O utilities and runner
-# ---------------------------------------
 
 def read_text(path: Path) -> str:
     try:

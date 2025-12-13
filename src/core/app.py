@@ -7,17 +7,7 @@ using a Retrieval-Augmented Generation (RAG) pipeline with:
 - LLM generation via Ollama for natural language responses
 - Reasoning layer for complex queries
 
-Features:
-- Vector-based retrieval
-- Intelligent query classification (Vector/Reasoning)
-- Optional Ollama LLM backend with template fallback
-- RESTful API for chat, search, and diagnostics
-- CORS-enabled for cross-origin requests
 """
-
-# ============================================================================
-# IMPORTS
-# ============================================================================
 
 from flask import Flask, render_template, request, jsonify
 import os
@@ -27,7 +17,6 @@ import datetime
 import requests
 from typing import List, Dict
 
-# Optional environment setup
 try:
     from dotenv import load_dotenv
     from pathlib import Path
@@ -43,10 +32,6 @@ from flask_cors import CORS
 from database.vector_db import ITUVectorDatabase
 from core.rag_pipeline import RAGPipeline
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
 logger = logging.getLogger(__name__)
 repo_root = Path(__file__).parent.parent.parent
 app = Flask(
@@ -56,21 +41,9 @@ app = Flask(
 )
 CORS(app)  # Enable CORS for all routes
 
-# ============================================================================
-# CHATBOT CLASS
-# ============================================================================
-
 class Chatbot:
-    """Chatbot for answering ITU questions using RAG pipeline."""
     
     def __init__(self):
-        """Initialize the chatbot with databases and RAG pipeline.
-        
-        Sets up:
-        - Vector database (FAISS embeddings)
-        - RAG pipeline (query classification + retrieval + generation)
-        - Ollama LLM connection
-        """
         self.conversation_history = []
         self.vector_db = None
         self.rag_pipeline = None
@@ -90,46 +63,43 @@ class Chatbot:
             if os.path.exists(index_path) and os.path.exists(metadata_path):
                 self.vector_db = ITUVectorDatabase()
                 self.vector_db.load_database(index_path=index_path, metadata_path=metadata_path)
-                print("✅ Vector database loaded successfully")
+                print("Vector database loaded successfully")
             else:
-                print("⚠️ Vector database not found.")
+                print("Vector database not found.")
         except Exception as e:
-            print(f"❌ Error loading vector database: {e}")
+            print(f"Error loading vector database: {e}")
     
     def setup_ollama(self):
-        """Configure Ollama as the LLM backend and test connectivity."""
         if not self.ollama_url:
-            print("⚠️  OLLAMA_URL not set. LLM responses disabled (will use template fallback).")
+            print("OLLAMA_URL not set. LLM responses disabled (will use template fallback).")
             return
         
         try:
-            # Test if Ollama server is reachable
             response = requests.get(f"{self.ollama_url.rstrip('/')}/api/tags", timeout=2)
             if response.status_code == 200:
                 model = os.getenv('OLLAMA_MODEL', 'unknown')
-                print(f"✅ Ollama online at {self.ollama_url}")
+                print(f"Ollama online at {self.ollama_url}")
                 print(f"   Model: {model}")
                 print(f"   LLM responses: ENABLED ✨")
             else:
-                print(f"⚠️  Ollama not responding (status {response.status_code}). LLM disabled.")
+                print(f"Ollama not responding (status {response.status_code}). LLM disabled.")
         except requests.exceptions.ConnectionError:
-            print(f"❌ Cannot connect to Ollama at {self.ollama_url}")
-            print(f"   Start Ollama with: ollama serve")
-            print(f"   LLM responses: DISABLED (using template fallback)")
+            print(f"Cannot connect to Ollama at {self.ollama_url}")
+            print(f" Start Ollama with: ollama serve")
+            print(f"LLM responses: DISABLED (using template fallback)")
         except requests.exceptions.Timeout:
-            print(f"⚠️  Ollama connection timeout. LLM responses disabled.")
+            print(f"Ollama connection timeout. LLM responses disabled.")
         except Exception as e:
-            print(f"⚠️  Error checking Ollama: {e}. LLM responses may be disabled.")
+            print(f"Error checking Ollama: {e}. LLM responses may be disabled.")
     
     def initialize_rag_pipeline(self):
-        """Initialize the RAG pipeline with loaded databases."""
         try:
             self.rag_pipeline = RAGPipeline(
                 vector_db=self.vector_db,
             )
-            print("✅ RAG pipeline initialized successfully")
+            print("RAG pipeline initialized successfully")
         except Exception as e:
-            print(f"❌ Error initializing RAG pipeline: {e}")
+            print(f"Error initializing RAG pipeline: {e}")
     
     def generate_response(self, user_message: str) -> Dict:
         """Generate a response using the RAG pipeline."""
@@ -149,12 +119,10 @@ class Chatbot:
             logger.error(f"Error generating response: {e}")
             return {"text": "An error occurred. Please try again.", "llm_used": False}
 
-# Lazily initialize the chatbot to avoid heavy work at import time
 chatbot = None
 
 
 def _init_chatbot_once():
-    """Create the chatbot instance once on first request. Safe to call multiple times."""
     global chatbot
     if chatbot is None:
         chatbot = Chatbot()
@@ -162,17 +130,9 @@ def _init_chatbot_once():
 
 @app.before_request
 def _ensure_chatbot_initialized():
-    """Ensure chatbot is initialized before processing requests.
-    
-    Flask 3 removed `before_first_request`; this uses `before_request` which
-    is called before every request but the initialization is idempotent.
-    """
     _init_chatbot_once()
 
 
-# ============================================================================
-# ROUTES: FRONTEND
-# ============================================================================
 
 @app.route('/')
 def index():
@@ -181,20 +141,7 @@ def index():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Handle chat messages from the UI.
-    
-    Request body:
-        {
-            "message": "user question"
-        }
-    
-    Returns:
-        {
-            "response": "chatbot answer",
-            "llm_used": bool,
-            "timestamp": "ISO timestamp"
-        }
-    """
+
     try:
         data = request.get_json()
         user_message = data.get('message', '').strip()
@@ -226,21 +173,9 @@ def chat():
         return jsonify({'error': 'An error occurred processing your message'}), 500
 
 
-# ============================================================================
-# ROUTES: DIAGNOSTICS & HEALTH
-# ============================================================================
 
 @app.route('/api/health')
 def health():
-    """Health check endpoint for monitoring.
-    
-    Returns:
-        {
-            "status": "healthy",
-            "timestamp": "ISO timestamp",
-            "chatbot": "ITU Chatbot v1.0"
-        }
-    """
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.datetime.now().isoformat(),
@@ -282,12 +217,6 @@ def search_knowledge():
 @app.route('/api/database/stats')
 def get_database_stats():
     """Get database statistics for vector database.
-    
-    Returns statistics on loaded databases and RAG pipeline status:
-        {
-            "vector_db": {...},
-            "rag_pipeline": {...}
-        }
     """
     stats = {}
     
@@ -305,26 +234,9 @@ def get_database_stats():
     
     return jsonify(stats)
 
-
-# ============================================================================
-# ROUTES: RAG PIPELINE DIAGNOSTICS
-# ============================================================================
-
 @app.route('/api/rag/classify', methods=['POST'])
 def classify_query():
     """Classify a query to determine which data sources to use.
-    
-    Request body:
-        {
-            "query": "What machine learning courses are available?"
-        }
-    
-    Returns classification (Vector/Reasoning) and metadata:
-        {
-            "query": "...",
-            "query_type": "vector|reasoning",
-            "metadata": {...}
-        }
     """
     try:
         data = request.get_json()
@@ -351,15 +263,7 @@ def classify_query():
 @app.route('/api/rag/retrieve', methods=['POST'])
 def rag_retrieve():
     """Retrieve merged RAG context for a query (diagnostic endpoint).
-    
-    Request body:
-        {
-            "query": "...",
-            "vector_k": 3,        // Number of vector results
-            "vector_offset": 0
-        }
-    
-    Returns context from vector search.
+
     """
     try:
         data = request.get_json()
@@ -395,10 +299,6 @@ def rag_retrieve():
     except Exception as e:
         return jsonify({'error': f'An error occurred: {str(e)}'}), 500
 
-
-# ============================================================================
-# APPLICATION ENTRY POINT
-# ============================================================================
 
 if __name__ == '__main__':
     print("\n" + "="*60)

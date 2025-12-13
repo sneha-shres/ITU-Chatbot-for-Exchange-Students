@@ -18,10 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 100) -> List[str]:
-  """
-  Simple token-approximate chunker by words with overlap.
-  max_tokens and overlap are in words (approximate tokens for English).
-  """
   if not text:
     return []
   words = text.split()
@@ -44,7 +40,6 @@ def chunk_text(text: str, max_tokens: int = 500, overlap: int = 100) -> List[str
 
 class ITUVectorDatabase:
   def __init__(self, model_name: str = None):
-    # Allow overriding via environment variable VECTOR_MODEL_NAME or by passing model_name
     import os as _os
     if model_name is None:
       model_name = _os.getenv('VECTOR_MODEL_NAME', 'all-MiniLM-L6-v2')
@@ -169,14 +164,13 @@ def main():
     # Initialize vector database
     vector_db = ITUVectorDatabase()
     
-    print("🚀 Building ITU Vector Database...")
     
     # Load scraped data from data/vectors by default
     scraped_json = os.path.join('data', 'vectors', 'itu_scraped_data.json')
     scraped_data = vector_db.load_scraped_data(scraped_json)
     
     if not scraped_data:
-        print("❌ No scraped data found. Please run the scraper first.")
+        print("No scraped data found. Please run the scraper first.")
         return
     
     # Create embeddings
@@ -193,16 +187,16 @@ def main():
     
     # Print statistics
     stats = vector_db.get_database_stats()
-    print("\n📊 Vector Database Statistics:")
+    print("\n Vector Database Statistics:")
     print(f"   Total vectors: {stats['total_vectors']:,}")
     print(f"   Dimension: {stats['dimension']}")
     print(f"   Model: {stats['model_name']}")
     print(f"   Total documents: {stats['total_documents']}")
     
-    print("\n✅ Vector database built successfully!")
+    print("\n Vector database built successfully!")
     
     # Test search
-    print("\n🔍 Testing search functionality...")
+    print("\n Testing search functionality...")
     test_queries = [
         "computer science programs",
         "research opportunities",
