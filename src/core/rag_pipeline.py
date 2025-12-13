@@ -439,7 +439,17 @@ class RAGPipeline:
                 if not raw_line:
                     continue
 
-                line = raw_line.strip()
+
+                # Normalize to string safely (some servers may yield bytes)
+                if isinstance(raw_line, bytes):
+                    try:
+                        line = raw_line.decode('utf-8', errors='replace').strip()
+                    except Exception:
+                        line = str(raw_line).strip()
+                else:
+                    line = raw_line.strip()
+
+      
                 # handle SSE 'data: {...}' lines
                 if line.startswith('data:'):
                     line = line[len('data:'):].strip()
