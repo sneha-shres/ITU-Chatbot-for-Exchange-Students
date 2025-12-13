@@ -21,26 +21,15 @@ COMBINATION_KEYWORDS = [
 
 
 class CourseCombinationReasoner:
-    """Reasoning engine for finding course combinations that meet ECTS requirements."""
     
     def __init__(self, course_db=None):
-        """Initialize the reasoning layer.
-        
-        Args:
-            course_db: CourseDatabase instance for querying courses
-        """
+
         self.course_db = course_db
         # simple in-memory cache for (target_scaled, course_codes_tuple, max_courses_per_combination)
         self._combo_cache = {}
     
     def is_combination_query(self, query: str) -> Tuple[bool, Optional[float]]:
         """Detect if a query is asking for course combinations that sum to ECTS.
-        
-        Args:
-            query: User query string
-            
-        Returns:
-            Tuple of (is_combination_query, target_ects_value)
         """
         ql = query.lower()
         print(ql)
@@ -96,16 +85,10 @@ class CourseCombinationReasoner:
         tolerance: float = 0.0,
         timeout_seconds: Optional[float] = 3.0,
     ) -> List[Dict]:
-        """Find all combinations of courses that sum to the target ECTS value.
-        This solves a variant of the subset sum problem with constraints:
-        - Find subsets of courses whose ECTS sum equals target_ects (within tolerance)
-        - Limit the number of courses per combination
-        - Limit the total number of combinations returned
-        """
 
         if not courses:
             return []
-        # Keep only courses with valid numeric ECTS (attempt robust conversion)
+        # Keep only courses with valid numeric ECTS 
         valid_courses = []
         for c in courses:
             raw_ects = c.get('ects')
@@ -124,8 +107,6 @@ class CourseCombinationReasoner:
             logger.warning("No courses with valid ECTS values found")
             return []
 
-        # Use integer scaling to avoid floating point issues and support decimals
-        # Scale factor: 10 supports one decimal place (e.g., 7.5 -> 75, 15 -> 150)
         scale = 10
 
         for c in valid_courses:
@@ -152,21 +133,6 @@ class CourseCombinationReasoner:
             return self._combo_cache[cache_key][:max_combinations] if max_combinations is not None else list(self._combo_cache[cache_key])
 
         combinations: List[Dict] = []
-
-        # Quick greedy pass (largest-first) to get at least one solution fast
-        # desc = sorted(valid_courses, key=lambda x: x['_ects_scaled'], reverse=True)
-        # greedy_combo = []
-        # greedy_sum = 0
-        # for c in desc:
-        #     if greedy_sum + c['_ects_scaled'] <= target_scaled:
-        #         greedy_combo.append(c)
-        #         greedy_sum += c['_ects_scaled']
-        #         if greedy_sum == target_scaled:
-        #             total_ects = sum(float(x.get('ects', 0)) for x in greedy_combo)
-        #             combinations.append({'courses': greedy_combo.copy(), 'total_ects': total_ects, 'course_count': len(greedy_combo)})
-        #             break
-        # print("combos after greedy:")
-        # print(combinations)
         
         if combinations and (max_combinations is None or len(combinations) >= max_combinations):
             self._combo_cache[cache_key] = combinations
@@ -250,14 +216,6 @@ class CourseCombinationReasoner:
         limit: int = 200
     ) -> List[Dict]:
         """Get all courses that could potentially be used in combinations.
-        
-        Args:
-            target_ects: Target ECTS value (used to filter out courses that are too large)
-            filters: Optional filters (semester, language, level, etc.)
-            limit: Maximum number of courses to retrieve
-            
-        Returns:
-            List of course dictionaries
         """
         if not self.course_db:
             logger.warning("Course database not available for combination reasoning")
@@ -330,12 +288,6 @@ class CourseCombinationReasoner:
     
     def format_combinations_for_context(self, combinations: List[Dict]) -> str:
         """Format combination results into a context string for LLM.
-        
-        Args:
-            combinations: List of combination dictionaries
-            
-        Returns:
-            Formatted string describing the combinations
         """
         if not combinations:
             return "No course combinations found that sum to the target ECTS value."
@@ -396,19 +348,6 @@ class CourseCombinationReasoner:
         filters: Optional[Dict] = None
     ) -> Dict:
         """Main reasoning function: detect combination query and find solutions.
-        
-        Args:
-            query: User query string
-            target_ects: Target ECTS value
-            filters: Optional filters for courses
-            
-        Returns:
-            Dictionary with reasoning results:
-            - is_combination_query: bool
-            - target_ects: float
-            - combinations: List of combination dicts
-            - courses_used: List of all courses considered
-            - formatted_context: String for LLM context
         """
         is_combo, detected_ects = self.is_combination_query(query)
         print(is_combo, detected_ects)
