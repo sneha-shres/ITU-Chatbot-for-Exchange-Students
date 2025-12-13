@@ -2,8 +2,6 @@ venv/
 __pycache__/
 *.pyc
 .env
-data/raw/*
-data/embeddings/*
-*.db
 .chroma/
 models/
+.ds_store

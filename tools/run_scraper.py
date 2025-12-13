@@ -12,7 +12,7 @@ Usage:
 """
 
 import os
-# Load environment variables from .env if present
+
 try:
   from dotenv import load_dotenv
   load_dotenv()
@@ -27,15 +27,11 @@ def main():
   print("ITU Website Scraper and Vector Database Builder")
   print("=" * 60)
 
-  # Step 1: Scrape the website
-  print("\nStep 1: Scraping site...")
   scraper = ITUWebScraper()
-  scraped_data = scraper.scrape_all_pages(max_pages=None)  # No limit - scrape all pages
-  print(scraped_data)
-  
+  scraped_data = scraper.scrape_all_pages(max_pages=None) 
   
   if not scraped_data:
-    print("❌ No data scraped. Exiting.")
+    print(" No data scraped. Exiting.")
     return
 
   # Save JSON snapshot for reference in data/vectors
@@ -45,7 +41,7 @@ def main():
   # Save URLs list for easy reference
   scraper.save_urls_list(os.path.join('data', 'itu_scraped_urls.txt'))
 
-  # Step 3: Build vector index
+  # build vector index
   print("\nStep 3: Building FAISS vector database...")
   vdb = ITUVectorDatabase()
   embeddings, metadata = vdb.create_embeddings(scraped_data, max_tokens=500, overlap=100)
@@ -59,7 +55,7 @@ def main():
   print(f"  Dimension: {stats.get('dimension')}")
   print(f"  Model: {stats.get('model_name')}")
 
-  print("\n✅ All steps completed successfully!")
+  print("\n All steps completed successfully!")
 
 
 if __name__ == "__main__":

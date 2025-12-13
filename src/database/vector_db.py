@@ -45,9 +45,8 @@ def chunk_text(text: str, max_tokens: int = 500, overlap: int = 100) -> List[str
 class ITUVectorDatabase:
   def __init__(self, model_name: str = None):
     # Allow overriding via environment variable VECTOR_MODEL_NAME or by passing model_name
-    import os as _os
     if model_name is None:
-      model_name = _os.getenv('VECTOR_MODEL_NAME', 'all-MiniLM-L6-v2')
+      model_name = os.getenv('VECTOR_MODEL_NAME', 'all-MiniLM-L6-v2')
     self.model_name = model_name
     self.model = SentenceTransformer(model_name)
     self.index = None
@@ -176,7 +175,7 @@ def main():
     scraped_data = vector_db.load_scraped_data(scraped_json)
     
     if not scraped_data:
-        print("❌ No scraped data found. Please run the scraper first.")
+        print("No scraped data found. Please run the scraper first.")
         return
     
     # Create embeddings
@@ -193,16 +192,14 @@ def main():
     
     # Print statistics
     stats = vector_db.get_database_stats()
-    print("\n📊 Vector Database Statistics:")
-    print(f"   Total vectors: {stats['total_vectors']:,}")
-    print(f"   Dimension: {stats['dimension']}")
-    print(f"   Model: {stats['model_name']}")
-    print(f"   Total documents: {stats['total_documents']}")
+    print("\nVector Database Statistics:")
+    print(f" Total vectors: {stats['total_vectors']:,}")
+    print(f" Dimension: {stats['dimension']}")
+    print(f" Model: {stats['model_name']}")
+    print(f" Total documents: {stats['total_documents']}")
     
-    print("\n✅ Vector database built successfully!")
+    print("\n Vector database built successfully!")
     
-    # Test search
-    print("\n🔍 Testing search functionality...")
     test_queries = [
         "computer science programs",
         "research opportunities",

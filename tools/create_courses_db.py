@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Create a SQLite database at Courses/output/courses.db from the CSV at
-Courses/output/courses.csv using only the Python standard library.
-
-This script is dependency-free and safe to run in constrained environments.
-"""
 import sqlite3
 import csv
 from pathlib import Path
@@ -27,7 +21,6 @@ with open(csv_path, newline='', encoding='utf-8') as f:
     rows = list(reader)
 print(f'Rows: {len(rows)}')
 
-# Columns we expect (matches course_db expectations)
 cols = [
     'course_title','course_code','abstract','description','teachers','ects','learning_outcomes',
     'semester','semester_start','semester_end','language','participants_max','location','campus',
